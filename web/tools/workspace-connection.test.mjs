@@ -67,3 +67,17 @@ test('messages distinguish platform revocation, actual route and incomplete hist
   assert.match(workspaceConnectionFeedback({ ...revoked, failure: undefined }), /历史记录未保存失败原因/);
   assert.match(workspaceVerificationFeedback({ status: 'partial', readSources: [{ source: 'subscriptions', permission: 'read', completeness: 'complete', outcome: 'operational' }, { source: 'workspace_members', permission: 'denied', completeness: 'unknown', outcome: 'unauthorized' }] }), /成员列表：空间凭据已失效/);
 });
+
+test('direct capacity and acquisition timeouts explain that no space request was sent', async () => {
+  for (const [code, reason] of [['connection_capacity_exhausted', /并发名额已用满/], ['connection_acquisition_timeout', /连接资源.*超时/]]) {
+    const failed = { ...revoked, failure: { code, routeMode: 'direct' } };
+    const message = workspaceConnectionFeedback(failed);
+    assert.match(message, reason);
+    assert.match(message, /尚未向 ChatGPT 发出空间请求/);
+    assert.match(message, /当前配置为直连/);
+    assert.doesNotMatch(message, /可用代理|本次为直连/);
+    const f = fixture({ exchange: async () => failed });
+    assert.deepEqual(await connectSelectedWorkspace(f.options), failed);
+    assert.deepEqual(f.calls, []);
+  }
+});

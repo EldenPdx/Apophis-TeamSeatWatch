@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"net/http"
 
 	"github.com/xft0202/Apophis-TeamSeatWatch/internal/egress"
@@ -17,6 +18,13 @@ func (e leasedWorkspaceTokenExchanger) ExchangeWorkspace(ctx context.Context, pe
 	if err != nil {
 		failure := platform.WorkspaceExchangeDiagnostic(err)
 		failure.RouteMode = string(e.egress.Status().Policy)
+		// No workspace request can be sent before a lease is acquired. A
+		// shared concurrency limit also applies to direct connections.
+		if errors.Is(err, egress.ErrLeaseExhausted) && failure.RouteMode == string(egress.ModeDirect) {
+			failure.Code = "connection_capacity_exhausted"
+		} else if errors.Is(err, context.DeadlineExceeded) {
+			failure.Code = "connection_acquisition_timeout"
+		}
 		return platform.WorkspaceAccess{}, failure
 	}
 	defer lease.Release()

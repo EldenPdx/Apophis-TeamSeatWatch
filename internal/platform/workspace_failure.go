@@ -44,6 +44,7 @@ func WorkspaceExchangeDiagnostic(err error) *WorkspaceExchangeFailure {
 		result.cause = nil
 		switch result.Code {
 		case "workspace_token_revoked", "workspace_no_longer_visible", "workspace_session_expired", "workspace_session_invalid", "proxy_capacity_exhausted", "proxy_egress_drift", "proxy_session_expired", "proxy_auth_rejected",
+			"connection_capacity_exhausted", "connection_acquisition_timeout",
 			"network_timeout", "network_dns_failed", "network_tls_failed", "network_error", "request_cancelled", "platform_browser_challenge", "platform_access_denied",
 			"platform_rate_limited", "platform_unavailable", "platform_http_rejected", "platform_redirected", "platform_response_invalid", "workspace_personal_returned",
 			"workspace_mismatch", "workspace_plan_unsupported", "workspace_read_scope_missing", "workspace_token_invalid", "workspace_token_expired", "workspace_exchange_unavailable":

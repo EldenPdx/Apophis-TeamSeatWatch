@@ -8,6 +8,8 @@ const connectionMessages: Record<string, string> = {
   workspace_session_expired: '母号登录会话已失效，无法获取空间凭据。同步时将自动重新登录母号并发现空间。',
   workspace_session_invalid: '已保存的母号会话缺少有效凭据，无法切换空间。同步时将自动重新登录母号并发现空间。',
   proxy_capacity_exhausted: '未取得可用代理，本次尚未向 ChatGPT 发出空间请求。请在代理管理确认健康节点和空闲名额后重试。',
+  connection_capacity_exhausted: '当前任务并发名额已用满，本次尚未向 ChatGPT 发出空间请求。请等待正在执行的任务完成后再同步。',
+  connection_acquisition_timeout: '取得连接资源前已超时，本次尚未向 ChatGPT 发出空间请求。请等待正在执行的任务完成后再同步。',
   proxy_egress_drift: '代理出口与验证时不一致，本次空间请求已停止。请重新验证代理节点后重试。',
   proxy_session_expired: '本次代理会话已到期，空间请求已停止。请补齐并验证新的代理节点后重试。',
   proxy_auth_rejected: '代理服务器拒绝了代理身份验证。请检查代理管理中的用户名和密码，再验证节点。',
@@ -42,7 +44,8 @@ export function workspaceConnectionFeedback(access: Access | null): string {
   const message = connectionMessages[failure.code] ?? connectionMessages.workspace_exchange_unavailable;
   const status = failure.httpStatus ? `HTTP ${failure.httpStatus}` : '';
   const upstream = failure.upstreamCode === 'token_revoked' ? 'token_revoked' : '';
-  const route = failure.routeMode === 'direct' ? '本次为直连' : failure.proxyScheme ? `本次已使用 ${failure.proxyScheme.toUpperCase()} 代理` : failure.routeMode === 'required' ? '本次要求使用代理，未取得代理连接' : '';
+  const acquisitionFailed = ['proxy_capacity_exhausted', 'connection_capacity_exhausted', 'connection_acquisition_timeout'].includes(failure.code);
+  const route = failure.routeMode === 'direct' ? acquisitionFailed ? '当前配置为直连，尚未建立连接' : '本次为直连' : failure.proxyScheme ? `本次已使用 ${failure.proxyScheme.toUpperCase()} 代理` : failure.routeMode === 'required' ? '本次要求使用代理，未取得代理连接' : '';
   return [message, status, upstream, route].filter(Boolean).join(' · ');
 }
 

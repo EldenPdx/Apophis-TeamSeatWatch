@@ -60,6 +60,8 @@ test('space connection failures show their saved cause, actual route and success
       { name: 'platform browser verification has its status and route', failure: { code: 'platform_browser_challenge', httpStatus: 403, routeMode: 'required', proxyScheme: 'socks5h' }, expected: 'ChatGPT 要求浏览器验证', route: 'HTTP 403' },
       { name: 'direct timeout keeps direct route even when pool settings require proxies', failure: { code: 'network_timeout', routeMode: 'direct' }, expected: '请求超时', route: '本次为直连' },
       { name: 'capacity failure says no platform request was sent', failure: { code: 'proxy_capacity_exhausted', routeMode: 'required' }, expected: '尚未向 ChatGPT 发出空间请求', route: '未取得代理连接' },
+      { name: 'direct concurrency limit is explained without blaming proxies', failure: { code: 'connection_capacity_exhausted', routeMode: 'direct' }, expected: '任务并发名额已用满', route: '当前配置为直连' },
+      { name: 'connection acquisition timeout is separate from a ChatGPT request timeout', failure: { code: 'connection_acquisition_timeout', routeMode: 'direct' }, expected: '连接资源前已超时', route: '当前配置为直连' },
     ]) await t.test(scenario.name, async () => {
       const f = await fixture(scenario.failure);
       if (scenario.failure.code === 'proxy_capacity_exhausted') {
