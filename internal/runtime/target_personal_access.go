@@ -14,8 +14,6 @@ import (
 	"github.com/xft0202/Apophis-TeamSeatWatch/internal/platform"
 )
 
-var errPersonalOwnerSession = errors.New("owner session changed before account publication")
-
 func (h *OwnerAuthHandler) GetTargetPersonalAccess(w http.ResponseWriter, r *http.Request, id openapi_types.UUID) {
 	if _, ok := h.authenticated(w, r, false); !ok {
 		return
@@ -40,15 +38,7 @@ func (h *OwnerAuthHandler) RefreshTargetPersonalAccess(w http.ResponseWriter, r 
 	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
 	defer cancel()
 	result, err := (accountsession.Store{Pool: h.pool, KeyRing: h.keyRing}).Ensure(ctx, id, h.personalRefresh, false, func(tx pgx.Tx) error {
-		// Acquiring business AT does not change Owner permissions. Recheck the
-		// authenticated session under a row lock so concurrent records can publish,
-		// while logout, revocation, expiry and password changes still fence results.
-		var sessionID string
-		err := tx.QueryRow(ctx, `SELECT session.id FROM tsw_owner_sessions session JOIN tsw_owners owner ON owner.id=session.owner_id WHERE session.id=$1 AND session.owner_id=$2 AND session.auth_version=owner.auth_version AND session.auth_version=$3 AND session.revoked_at IS NULL AND session.idle_expires_at>now() AND session.absolute_expires_at>now() FOR SHARE OF session,owner`, owner.SessionID, owner.OwnerID, owner.AuthVersion).Scan(&sessionID)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return errPersonalOwnerSession
-		}
-		return err
+		return h.lockCurrentOwnerSession(ctx, tx, owner)
 	})
 	switch {
 	case errors.Is(err, errPersonalOwnerSession):

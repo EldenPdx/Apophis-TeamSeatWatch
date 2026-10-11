@@ -32,6 +32,8 @@ export function useMotherWorkspaces(active: boolean) {
   const [notice, setNotice, dismissNotice] = useActionFeedback('');
   const [readFailed, setReadFailed] = useState(false);
   const [records, setRecords] = useState<Record<string, MotherWorkspaceRecord>>({});
+  const recordsRef = useRef(records);
+  recordsRef.current = records;
   const sequences = useRef(new Map<string, number>());
   const locks = useRef(new Set<string>());
   const live = useRef(true);
@@ -66,7 +68,7 @@ export function useMotherWorkspaces(active: boolean) {
   async function read(account: MotherAccount, signal?: AbortSignal) {
     if (account.status !== 'active' || locks.current.has(account.id)) return;
     const sequence = begin(account.id);
-    publish(account.id, sequence, { ...emptyRecord(), phase: 'reading' });
+    publish(account.id, sequence, { ...(recordsRef.current[account.id] ?? emptyRecord()), phase: 'reading' });
     try {
       const [accessResult, discoveryResult] = await Promise.allSettled([getMotherPersonalAccess(account.id, signal), getMotherDiscovery(account.id, signal)]);
       if (signal?.aborted) return;
@@ -87,18 +89,32 @@ export function useMotherWorkspaces(active: boolean) {
     const controller = new AbortController();
     const pageIds = new Set(items.map((item) => item.id));
     setRecords((current) => Object.fromEntries(Object.entries(current).filter(([id]) => pageIds.has(id) || locks.current.has(id))));
-    let cursor = 0;
     // Only enrich the visible server page. Three records at a time use at most
     // six reads, and changing the page cancels every outstanding page read.
-    const worker = async () => {
-      while (!controller.signal.aborted) {
-        const account = items[cursor++];
-        if (!account) return;
-        await read(account, controller.signal);
-      }
+    const enrich = async (accounts: MotherAccount[]) => {
+      let cursor = 0;
+      const worker = async () => {
+        while (!controller.signal.aborted) {
+          const account = accounts[cursor++];
+          if (!account) return;
+          await read(account, controller.signal);
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(3, accounts.length) }, worker));
     };
-    void Promise.all(Array.from({ length: Math.min(3, items.length) }, worker));
-    return () => controller.abort();
+    let polling = true;
+    void enrich(items).finally(() => { polling = false; });
+    const timer = window.setInterval(() => {
+      if (polling || controller.signal.aborted) return;
+      const pending = items.filter(account => {
+        const record = recordsRef.current[account.id];
+        return !locks.current.has(account.id) && !record?.phase && (record?.access?.status === 'verifying' || record?.discovery?.status === 'discovering');
+      });
+      if (!pending.length) return;
+      polling = true;
+      void enrich(pending).finally(() => { polling = false; });
+    }, 2000);
+    return () => { controller.abort(); window.clearInterval(timer); };
   }, [active, items, loading]);
 
   async function discover(account: MotherAccount, login: boolean) {

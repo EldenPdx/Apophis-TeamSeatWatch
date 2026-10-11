@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { connectSelectedWorkspace, workspaceConnectionFeedback, workspaceVerificationFeedback } from '../src/owner/workspaceConnection.ts';
+import { connectSelectedWorkspace, motherLoginFailure, workspaceConnectionFeedback, workspaceVerificationFeedback } from '../src/owner/workspaceConnection.ts';
 
 const motherId = 'mother'; const workspaceId = 'chosen-team';
 const revoked = { motherAccountId: motherId, workspaceId, status: 'failed', failure: { code: 'workspace_token_revoked', upstreamCode: 'token_revoked', httpStatus: 401, routeMode: 'required', proxyScheme: 'socks5h' } };
@@ -79,5 +79,13 @@ test('direct capacity and acquisition timeouts explain that no space request was
     const f = fixture({ exchange: async () => failed });
     assert.deepEqual(await connectSelectedWorkspace(f.options), failed);
     assert.deepEqual(f.calls, []);
+  }
+});
+
+test('login interruption, timeout and result storage failures never blame saved credentials', () => {
+  for (const [code, reason] of [['login_task_interrupted', /上次登录任务未完成/], ['login_task_timeout', /登录执行超时/], ['login_result_not_saved', /未能保存本次登录结果/]]) {
+    const message = motherLoginFailure({ motherAccountId: motherId, status: 'refresh_failed', failure: { code } });
+    assert.match(message, reason);
+    assert.doesNotMatch(message, /密码错误|2FA 错误|母号登录已失效/);
   }
 });

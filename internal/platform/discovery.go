@@ -88,7 +88,7 @@ func ValidatePersonalRefresh(result PersonalRefreshResult, now time.Time) bool {
 			return false
 		}
 		switch result.Failure.Code {
-		case "platform_browser_challenge", "platform_access_denied", "platform_rate_limited", "platform_unavailable", "network_timeout", "network_error", "login_request_failed":
+		case "platform_browser_challenge", "platform_access_denied", "platform_rate_limited", "platform_unavailable", "network_timeout", "network_error", "login_request_failed", "login_task_interrupted", "login_task_timeout", "login_result_not_saved":
 		default:
 			return false
 		}

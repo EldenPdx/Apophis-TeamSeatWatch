@@ -17,6 +17,9 @@ export function personalAccessFeedback(access: PersonalAccess): AccountFeedback 
       network_timeout: '登录连接超时，请稍后重试',
       network_error: '登录连接失败，请检查网络连接后重试',
       login_request_failed: '平台登录流程未完成，请稍后重试',
+      login_task_interrupted: '上次登录任务未完成，请重新获取 AT',
+      login_task_timeout: '本次登录执行超时，请重新获取 AT',
+      login_result_not_saved: '登录结果未能保存，请重新获取 AT',
     };
     return { message: `${messages[access.failure.code]}${access.failure.httpStatus ? ` · HTTP ${access.failure.httpStatus}` : ''}`, tone: 'error' };
   }

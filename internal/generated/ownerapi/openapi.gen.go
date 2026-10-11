@@ -1350,6 +1350,9 @@ func (e OperationDraftChangeChoice) Valid() bool {
 // Defines values for PersonalLoginFailureCode.
 const (
 	PersonalLoginFailureCodeLoginRequestFailed       PersonalLoginFailureCode = "login_request_failed"
+	PersonalLoginFailureCodeLoginResultNotSaved      PersonalLoginFailureCode = "login_result_not_saved"
+	PersonalLoginFailureCodeLoginTaskInterrupted     PersonalLoginFailureCode = "login_task_interrupted"
+	PersonalLoginFailureCodeLoginTaskTimeout         PersonalLoginFailureCode = "login_task_timeout"
 	PersonalLoginFailureCodeNetworkError             PersonalLoginFailureCode = "network_error"
 	PersonalLoginFailureCodeNetworkTimeout           PersonalLoginFailureCode = "network_timeout"
 	PersonalLoginFailureCodePlatformAccessDenied     PersonalLoginFailureCode = "platform_access_denied"
@@ -1362,6 +1365,12 @@ const (
 func (e PersonalLoginFailureCode) Valid() bool {
 	switch e {
 	case PersonalLoginFailureCodeLoginRequestFailed:
+		return true
+	case PersonalLoginFailureCodeLoginResultNotSaved:
+		return true
+	case PersonalLoginFailureCodeLoginTaskInterrupted:
+		return true
+	case PersonalLoginFailureCodeLoginTaskTimeout:
 		return true
 	case PersonalLoginFailureCodeNetworkError:
 		return true

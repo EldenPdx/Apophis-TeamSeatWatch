@@ -13,13 +13,13 @@ const future = new Date(Date.now() + 86400000).toISOString();
 test('space connection failures show their saved cause, actual route and successful retry', { skip: !process.env.TSW_OWNER_BROWSER_URL }, async t => {
   const browser = await chromium.launch({ ...(process.env.TSW_BROWSER_EXECUTABLE ? { executablePath: process.env.TSW_BROWSER_EXECUTABLE } : {}), headless: true, args: ['--no-sandbox'] });
   await mkdir('.scratch/space-diagnostics', { recursive: true });
-  const fixture = async failure => {
+  const fixture = async (failure, initialPersonalStatus = 'ready', inspect = true) => {
     const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
     const page = await context.newPage(); page.setDefaultTimeout(6000);
     await page.clock.install();
     await page.addInitScript(() => { Object.defineProperty(navigator, 'clipboard', { value: { writeText: async text => { window.fixtureClipboard = text; } } }); });
     let access = { motherAccountId: mother, workspaceId: workspace, status: 'required' };
-    let succeed = false; let verificationPosts = 0; let personalStatus = 'ready'; let opened = false;
+    let succeed = false; let verificationPosts = 0; let personalStatus = initialPersonalStatus; let opened = false;
     const errors = []; const posts = [];
     page.on('pageerror', error => errors.push(error.message));
     await page.route('**/api/owner/**', route => {
@@ -31,8 +31,8 @@ test('space connection failures show their saved cause, actual route and success
       if (path.endsWith('/proxy-pool/settings')) return json({ mode: 'proxy_required', taskConcurrency: 3, healthyCount: 1 });
       if (path.endsWith('/mother-accounts/export')) return route.fulfill({ status: 200, contentType: 'text/plain', body: `${email}----fixture-password----fixture-totp\n` });
       if (path.endsWith('/mother-accounts')) return json({ items: [{ id: mother, loginIdentifier: email, displayName: email, status: 'active', materialStatus: 'complete', hasPassword: true, hasTotp: true, version: 1, createdAt: future, updatedAt: future }], total: 1, page: 1, pageSize: 20 });
-      if (path.endsWith('/personal-session')) { if (request.method() === 'POST') { personalStatus = 'ready'; succeed = true; access = { motherAccountId: mother, workspaceId: workspace, status: 'required' }; } return json({ motherAccountId: mother, status: personalStatus }); }
-      if (path.endsWith('/discovery')) return json({ motherAccountId: mother, status: 'discovered', observedAt: future, workspaces: [{ id: workspace, displayName: '测试 Team', accessStatus: 'readable' }] });
+      if (path.endsWith('/personal-session')) { if (request.method() === 'POST') { personalStatus = 'ready'; succeed = true; access = { motherAccountId: mother, workspaceId: workspace, status: 'required' }; } return json({ motherAccountId: mother, status: personalStatus, ...(personalStatus === 'refresh_failed' ? { failure: { code: 'login_task_interrupted' } } : {}) }); }
+      if (path.endsWith('/discovery')) return json(initialPersonalStatus === 'verifying' ? { motherAccountId: mother, status: 'not_verified', workspaces: [] } : { motherAccountId: mother, status: 'discovered', observedAt: future, workspaces: [{ id: workspace, displayName: '测试 Team', accessStatus: 'readable' }] });
       if (path.endsWith('/access')) {
         if (request.method() === 'POST') { if (failure.code === 'workspace_token_revoked') personalStatus = 'session_expired'; access = { motherAccountId: mother, workspaceId: workspace, status: succeed ? 'ready' : 'failed', checkedAt: new Date().toISOString(), ...(succeed ? { expiresAt: future, exchangeId: 'exchange-new' } : { failure }) }; }
         return json(access);
@@ -50,10 +50,25 @@ test('space connection failures show their saved cause, actual route and success
       await page.getByRole('option', { name: '测试 Team', exact: true }).click();
       await page.getByRole('button', { name: '同步空间', exact: true }).waitFor();
     };
-    await open();
-    return { page, open, posts, retry: () => { succeed = true; }, verificationPosts: () => verificationPosts, close: async () => { assert.deepEqual(errors, []); await context.close(); } };
+    if (inspect) await open(); else await page.goto(`${ownerURL}/owner/#workspaces`);
+    return { page, open, posts, retry: () => { succeed = true; }, completePersonal: status => { personalStatus = status; }, verificationPosts: () => verificationPosts, close: async () => { assert.deepEqual(errors, []); await context.close(); } };
   };
   try {
+    for (const terminal of ['ready', 'refresh_failed']) await t.test(`reloading during mother login polls to ${terminal} without a second login`, async () => {
+      const f = await fixture({ code: 'workspace_session_expired' }, 'verifying', false);
+      try {
+        let row = f.page.getByRole('row').filter({ hasText: email });
+        await row.getByText('登录中', { exact: true }).first().waitFor();
+        await f.page.reload();
+        row = f.page.getByRole('row').filter({ hasText: email });
+        await row.getByText('登录中', { exact: true }).first().waitFor();
+        f.completePersonal(terminal);
+        await f.page.clock.runFor(2500);
+        await row.getByText(terminal === 'ready' ? '已登录' : '登录失败', { exact: true }).waitFor();
+        if (terminal === 'refresh_failed') await row.getByRole('alert').filter({ hasText: '上次登录任务未完成' }).waitFor();
+        assert.deepEqual(f.posts, [], 'restoring status only reads the pending task');
+      } finally { await f.close(); }
+    });
     for (const scenario of [
       { name: 'revoked mother login has a direct full login recovery', failure: { code: 'workspace_token_revoked', upstreamCode: 'token_revoked', httpStatus: 401, routeMode: 'required', proxyScheme: 'socks5h' }, expected: '母号登录凭据已被 ChatGPT 撤销', route: 'token_revoked' },
       { name: 'Team switching fails through a real proxy without blaming the password', failure: { code: 'workspace_personal_returned', httpStatus: 200, routeMode: 'required', proxyScheme: 'socks5h' }, expected: '具体原因尚未确认', route: '本次已使用 SOCKS5H 代理' },

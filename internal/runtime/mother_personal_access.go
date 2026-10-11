@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -16,6 +17,9 @@ import (
 	"github.com/xft0202/Apophis-TeamSeatWatch/internal/mothersecret"
 	"github.com/xft0202/Apophis-TeamSeatWatch/internal/platform"
 )
+
+const motherPersonalRefreshTimeout = 120 * time.Second
+const motherPersonalRefreshStaleAfter = motherPersonalRefreshTimeout + 10*time.Second
 
 func (h *OwnerAuthHandler) GetMotherPersonalAccess(w http.ResponseWriter, r *http.Request, id openapi_types.UUID) {
 	if _, ok := h.authenticated(w, r, false); !ok {
@@ -104,6 +108,18 @@ func (h *OwnerAuthHandler) RefreshMotherPersonalAccess(w http.ResponseWriter, r 
 		writeProblem(w, r, http.StatusConflict, "mother_disabled", "Account Disabled", "Mother account is disabled", 0)
 		return
 	}
+	// A reserved login belongs to the service, so refreshing the page cannot
+	// cancel its result publication. Allow for the shared lease wait and TOTP
+	// rollover as well as the measured full login; keep every stage bounded.
+	taskCtx, stopTask := context.WithTimeout(context.WithoutCancel(r.Context()), motherPersonalRefreshTimeout)
+	defer stopTask()
+	r = r.WithContext(taskCtx)
+	persisted := false
+	defer func() {
+		if !persisted {
+			h.finishMotherRefreshAttempt(taskCtx, id, attempt)
+		}
+	}()
 	status := "missing_credentials"
 	var session platform.PersonalSession
 	var failure []byte
@@ -113,14 +129,19 @@ func (h *OwnerAuthHandler) RefreshMotherPersonalAccess(w http.ResponseWriter, r 
 		if adapter == nil {
 			adapter = platform.UnavailablePersonalRefresh{}
 		}
-		ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
-		result, refreshErr := adapter.RefreshPersonal(ctx, attempt.material)
-		cancel()
+		result, refreshErr := adapter.RefreshPersonal(taskCtx, attempt.material)
 		switch {
 		case errors.Is(refreshErr, platform.ErrPersonalRefreshUnavailable):
 			status = "unavailable"
 		case refreshErr != nil || !platform.ValidatePersonalRefresh(result, time.Now()):
 			status = "refresh_failed"
+			code := "login_request_failed"
+			if errors.Is(refreshErr, context.DeadlineExceeded) || errors.Is(taskCtx.Err(), context.DeadlineExceeded) {
+				code = "login_task_timeout"
+			} else if errors.Is(refreshErr, context.Canceled) {
+				code = "login_task_interrupted"
+			}
+			failure, _ = json.Marshal(platform.PersonalRefreshFailure{Code: code})
 		default:
 			status, session = result.Status, result.Session
 			if result.Failure != nil {
@@ -128,6 +149,11 @@ func (h *OwnerAuthHandler) RefreshMotherPersonalAccess(w http.ResponseWriter, r 
 			}
 		}
 	}
+	// Result persistence needs its own short deadline even when the platform
+	// attempt has exhausted its time budget.
+	publishCtx, stopPublish := context.WithTimeout(context.WithoutCancel(taskCtx), 5*time.Second)
+	defer stopPublish()
+	r = r.WithContext(publishCtx)
 	tx, err := h.pool.Begin(r.Context())
 	if err != nil {
 		h.workspaceFailure(w, r, err)
@@ -162,10 +188,12 @@ func (h *OwnerAuthHandler) RefreshMotherPersonalAccess(w http.ResponseWriter, r 
 			return
 		}
 	}
-	var token string
-	var idle time.Time
 	if status == "ready" {
-		token, idle, err = h.rotateSessionTx(r.Context(), tx, owner, "mother_personal_refresh", r)
+		err = h.lockCurrentOwnerSession(r.Context(), tx, owner)
+	}
+	if errors.Is(err, errPersonalOwnerSession) {
+		writeProblem(w, r, http.StatusUnauthorized, "session_expired", "Session Expired", "The Owner session changed before mother login publication", 0)
+		return
 	}
 	if err != nil {
 		h.workspaceFailure(w, r, err)
@@ -175,9 +203,7 @@ func (h *OwnerAuthHandler) RefreshMotherPersonalAccess(w http.ResponseWriter, r 
 		h.workspaceFailure(w, r, err)
 		return
 	}
-	if token != "" {
-		auth.SetSessionCookie(w, token, idle, h.secureCookies)
-	}
+	persisted = true
 	response, err := h.motherPersonalAccess(r, id)
 	if err != nil {
 		h.workspaceFailure(w, r, err)
@@ -186,16 +212,30 @@ func (h *OwnerAuthHandler) RefreshMotherPersonalAccess(w http.ResponseWriter, r 
 	writeJSON(w, http.StatusOK, response)
 }
 
+func (h *OwnerAuthHandler) finishMotherRefreshAttempt(parent context.Context, id uuid.UUID, attempt personalRefreshAttempt) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), 5*time.Second)
+	defer cancel()
+	failure, _ := json.Marshal(platform.PersonalRefreshFailure{Code: "login_result_not_saved"})
+	_, err := h.pool.Exec(ctx, `UPDATE tsw_mother_personal_access SET status='refresh_failed',failure=$4,checked_at=now() WHERE mother_account_id=$1 AND secret_revision=$2 AND attempt=$3 AND status='verifying'`, id, attempt.revision, attempt.attempt, failure)
+	if err != nil {
+		slog.ErrorContext(ctx, "mother_login_result_cleanup_failed", "error", err)
+	}
+}
+
 func (h *OwnerAuthHandler) motherPersonalAccess(r *http.Request, id uuid.UUID) (ownerapi.MotherPersonalAccess, error) {
 	response := ownerapi.MotherPersonalAccess{MotherAccountId: id, Status: ownerapi.MotherPersonalAccessStatusNotVerified}
 	var status *string
 	var checked *time.Time
 	var failure []byte
-	err := h.pool.QueryRow(r.Context(), `SELECT CASE WHEN access.status='ready' AND (session.mother_account_id IS NULL OR session.expires_at<=now()) THEN NULL WHEN access.status='verifying' AND access.checked_at<now()-interval '1 minute' THEN 'refresh_failed' ELSE access.status END,access.checked_at,access.failure FROM tsw_mother_accounts account JOIN tsw_mother_account_credentials credential ON credential.mother_account_id=account.id LEFT JOIN tsw_mother_personal_access access ON access.mother_account_id=account.id AND access.secret_revision=credential.secret_revision LEFT JOIN tsw_mother_personal_sessions session ON session.mother_account_id=account.id AND session.secret_revision=credential.secret_revision WHERE account.id=$1 AND account.status='active'`, id).Scan(&status, &checked, &failure)
+	err := h.pool.QueryRow(r.Context(), `SELECT CASE WHEN access.status='ready' AND (session.mother_account_id IS NULL OR session.expires_at<=now()) THEN NULL ELSE access.status END,access.checked_at,access.failure FROM tsw_mother_accounts account JOIN tsw_mother_account_credentials credential ON credential.mother_account_id=account.id LEFT JOIN tsw_mother_personal_access access ON access.mother_account_id=account.id AND access.secret_revision=credential.secret_revision LEFT JOIN tsw_mother_personal_sessions session ON session.mother_account_id=account.id AND session.secret_revision=credential.secret_revision WHERE account.id=$1 AND account.status='active'`, id).Scan(&status, &checked, &failure)
 	if err != nil {
 		return response, err
 	}
 	if status != nil {
+		if *status == "verifying" && checked != nil && checked.Before(time.Now().Add(-motherPersonalRefreshStaleAfter)) {
+			*status = "refresh_failed"
+			failure, _ = json.Marshal(platform.PersonalRefreshFailure{Code: "login_task_interrupted"})
+		}
 		response.Status = ownerapi.MotherPersonalAccessStatus(*status)
 		response.CheckedAt = checked
 		if *status == "refresh_failed" && len(failure) > 0 {

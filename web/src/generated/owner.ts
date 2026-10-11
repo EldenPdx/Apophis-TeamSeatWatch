@@ -2697,7 +2697,7 @@ export interface components {
         };
         PersonalLoginFailure: {
             /** @enum {string} */
-            code: "platform_browser_challenge" | "platform_access_denied" | "platform_rate_limited" | "platform_unavailable" | "network_timeout" | "network_error" | "login_request_failed";
+            code: "platform_browser_challenge" | "platform_access_denied" | "platform_rate_limited" | "platform_unavailable" | "network_timeout" | "network_error" | "login_request_failed" | "login_task_interrupted" | "login_task_timeout" | "login_result_not_saved";
             httpStatus?: number;
         };
         TargetPersonalAccess: {

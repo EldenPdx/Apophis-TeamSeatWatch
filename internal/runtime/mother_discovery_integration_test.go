@@ -44,6 +44,12 @@ type fixturePersonalRefresh struct {
 	calls  int
 }
 
+type failedPersonalRefresh struct{ err error }
+
+func (f failedPersonalRefresh) RefreshPersonal(context.Context, platform.MotherMaterial) (platform.PersonalRefreshResult, error) {
+	return platform.PersonalRefreshResult{}, f.err
+}
+
 func (f *fixturePersonalRefresh) RefreshPersonal(_ context.Context, material platform.MotherMaterial) (platform.PersonalRefreshResult, error) {
 	if material.Password != "password" || material.TOTPSecret == "" {
 		panic("refresh did not receive saved mother material")
@@ -259,6 +265,88 @@ func TestMotherDiscoveryPersistsPerMotherVisibilityWithoutBindingOrImplicitSelec
 	if status, result := readAccess(http.MethodPost, missingID, true, true); status != 200 || result.Status != "missing_credentials" || refresh.calls != 0 {
 		t.Fatalf("missing material refresh: %d %+v", status, result)
 	}
+	t.Run("browser disconnect does not cancel a reserved mother login or revoke Owner", func(t *testing.T) {
+		login := &sequencedPersonalRefresh{entered: make(chan struct{}), release: make(chan struct{}), session: refresh.result.Session}
+		handler.personalRefresh = login
+		defer func() { handler.personalRefresh = refresh }()
+		requestContext, disconnect := context.WithCancel(ctx)
+		defer disconnect()
+		req := httptest.NewRequest(http.MethodPost, "/api/owner/v1/mother-accounts/"+firstID.String()+"/personal-session", nil).WithContext(requestContext)
+		req.Header.Set("Origin", "https://owner.test")
+		req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: session})
+		req.AddCookie(&http.Cookie{Name: auth.CSRFCookieName, Value: csrf})
+		req.Header.Set(auth.CSRFHeaderName, csrf)
+		rec := httptest.NewRecorder()
+		done := make(chan struct{})
+		go func() { serve.ServeHTTP(rec, req); close(done) }()
+		<-login.entered
+		disconnect()
+		close(login.release)
+		<-done
+		if rec.Code != http.StatusOK {
+			t.Fatalf("browser disconnect prevented login publication: HTTP %d", rec.Code)
+		}
+		for _, cookie := range rec.Result().Cookies() {
+			if cookie.Name == auth.SessionCookieName {
+				t.Fatal("ordinary mother login rotated Owner cookie; a disconnected browser cannot receive it")
+			}
+		}
+		if status, result := readAccess(http.MethodGet, firstID, true, false); status != 200 || result.Status != "ready" {
+			t.Fatalf("reload did not recover final login state with original Owner: %d %+v", status, result)
+		}
+	})
+	if t.Failed() {
+		return
+	}
+	t.Run("login timeout publishes a final failure instead of verifying", func(t *testing.T) {
+		handler.personalRefresh = failedPersonalRefresh{err: context.DeadlineExceeded}
+		defer func() { handler.personalRefresh = refresh }()
+		if status, result := readAccess(http.MethodPost, firstID, true, true); status != 200 || result.Status != "refresh_failed" || result.Failure == nil || result.Failure.Code != "login_task_timeout" {
+			t.Fatalf("deadline did not publish an actionable final failure: %d %+v", status, result)
+		}
+	})
+	t.Run("logout during login blocks publication and clears the same attempt", func(t *testing.T) {
+		login := &sequencedPersonalRefresh{entered: make(chan struct{}), release: make(chan struct{}), session: refresh.result.Session}
+		handler.personalRefresh = login
+		defer func() { handler.personalRefresh = refresh }()
+		isolatedToken, isolatedHash, err := auth.NewSessionToken()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = pool.Exec(ctx, `INSERT INTO tsw_owner_sessions(owner_id,token_hash,auth_version,idle_expires_at,absolute_expires_at) VALUES($1,$2,1,now()+interval '1 hour',now()+interval '2 hours')`, ownerID, isolatedHash[:]); err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/api/owner/v1/mother-accounts/"+firstID.String()+"/personal-session", nil)
+		req.Header.Set("Origin", "https://owner.test")
+		req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: isolatedToken})
+		req.AddCookie(&http.Cookie{Name: auth.CSRFCookieName, Value: csrf})
+		req.Header.Set(auth.CSRFHeaderName, csrf)
+		rec := httptest.NewRecorder()
+		done := make(chan struct{})
+		go func() { serve.ServeHTTP(rec, req); close(done) }()
+		<-login.entered
+		_, revokeErr := pool.Exec(ctx, `UPDATE tsw_owner_sessions SET revoked_at=now(),revocation_reason='logout' WHERE token_hash=$1`, isolatedHash[:])
+		close(login.release)
+		<-done
+		if revokeErr != nil || rec.Code != http.StatusUnauthorized {
+			t.Fatalf("revoked Owner published credentials: HTTP %d error=%v", rec.Code, revokeErr)
+		}
+		if status, result := readAccess(http.MethodGet, firstID, true, false); status != 200 || result.Status != "refresh_failed" || result.Failure == nil || result.Failure.Code != "login_result_not_saved" {
+			t.Fatalf("authorization failure left a pending login: %d %+v", status, result)
+		}
+		var retained bool
+		if err = pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM tsw_mother_personal_sessions WHERE mother_account_id=$1)`, firstID).Scan(&retained); err != nil || retained {
+			t.Fatal("logout result retained credentials")
+		}
+	})
+	t.Run("stale task has an explicit interruption cause", func(t *testing.T) {
+		if _, err = pool.Exec(ctx, `UPDATE tsw_mother_personal_access SET status='verifying',failure=NULL,checked_at=now()-interval '3 minutes' WHERE mother_account_id=$1`, firstID); err != nil {
+			t.Fatal(err)
+		}
+		if status, result := readAccess(http.MethodGet, firstID, true, false); status != 200 || result.Status != "refresh_failed" || result.Failure == nil || result.Failure.Code != "login_task_interrupted" {
+			t.Fatalf("stale login lost the interruption cause: %d %+v", status, result)
+		}
+	})
 	for _, id := range []uuid.UUID{firstID, secondID} {
 		if status, result := readAccess(http.MethodPost, id, true, true); status != 200 || result.Status != "ready" {
 			t.Fatalf("Personal refresh: %d %+v", status, result)

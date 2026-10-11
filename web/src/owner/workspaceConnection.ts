@@ -98,8 +98,11 @@ export function motherLoginFailure(access: PersonalAccess): string {
     network_timeout: '自动登录请求超时，未收到平台的有效响应',
     network_error: '自动登录时网络连接失败',
     login_request_failed: '自动登录未完成，平台未返回可确认的登录结果',
+    login_task_interrupted: '上次登录任务未完成，未保存有效会话；同步时会自动重新登录',
+    login_task_timeout: '本次登录执行超时，未保存有效会话；请稍后再同步',
+    login_result_not_saved: '服务器未能保存本次登录结果，尚未建立有效登录会话；请再次同步',
   };
-  return `母号登录已失效；${failure ? messages[failure.code] ?? '自动登录未完成，服务端未保存可确认的原因' : '自动登录未成功，服务端未保存具体原因'}${failure?.httpStatus ? `（HTTP ${failure.httpStatus}）` : ''}。`;
+  return `自动登录未完成：${failure ? messages[failure.code] ?? '服务端未保存可确认的原因' : '服务端未保存具体原因'}${failure?.httpStatus ? `（HTTP ${failure.httpStatus}）` : ''}。`;
 }
 
 // Recover only during an explicit sync, once, and keep the selected mother and
