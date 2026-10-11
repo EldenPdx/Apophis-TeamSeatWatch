@@ -22,7 +22,8 @@
   <a href="#preview">产品预览</a> &nbsp; / &nbsp;
   <a href="#workflow">使用流程</a> &nbsp; / &nbsp;
   <a href="#start">快速开始</a> &nbsp; / &nbsp;
-  <a href="#community">社区</a>
+  <a href="#community">社区</a> &nbsp; / &nbsp;
+  <a href="https://linux.do/">LINUX DO</a>
 </p>
 
 <p align="center">

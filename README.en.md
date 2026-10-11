@@ -22,7 +22,8 @@
   <a href="#preview">Product</a> &nbsp; / &nbsp;
   <a href="#workflow">Workflow</a> &nbsp; / &nbsp;
   <a href="#start">Get started</a> &nbsp; / &nbsp;
-  <a href="#community">Community</a>
+  <a href="#community">Community</a> &nbsp; / &nbsp;
+  <a href="https://linux.do/">LINUX DO</a>
 </p>
 
 <p align="center">
