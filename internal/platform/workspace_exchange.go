@@ -44,16 +44,24 @@ func (e OfficialWorkspaceTokenExchanger) ExchangeWorkspace(ctx context.Context, 
 
 func (e OfficialWorkspaceTokenExchanger) exchangeWorkspace(ctx context.Context, personal PersonalSession, workspaceID, candidateUser string) (WorkspaceAccess, error) {
 	failed := WorkspaceAccess{}
-	if e.Client == nil || !ValidatePersonalRefresh(PersonalRefreshResult{Status: "ready", Session: personal}, time.Now()) ||
-		workspaceID == "" || len(workspaceID) > 255 || strings.TrimSpace(workspaceID) != workspaceID || strings.ContainsAny(workspaceID, "\r\n\x00") {
-		return failed, ErrWorkspaceExchangeUnavailable
+	if !personal.ExpiresAt.After(time.Now().Add(time.Minute)) {
+		return failed, workspaceFailure("workspace_session_expired", 0, nil)
+	}
+	if !ValidatePersonalRefresh(PersonalRefreshResult{Status: "ready", Session: personal}, time.Now()) {
+		return failed, workspaceFailure("workspace_session_invalid", 0, nil)
+	}
+	if e.Client == nil || workspaceID == "" || len(workspaceID) > 255 || strings.TrimSpace(workspaceID) != workspaceID || strings.ContainsAny(workspaceID, "\r\n\x00") {
+		return failed, workspaceFailure("workspace_exchange_unavailable", 0, nil)
 	}
 	base, release, err := e.Client(ctx)
 	if release != nil {
 		defer release()
 	}
-	if err != nil || base == nil || base.Transport == nil || base.Timeout <= 0 {
-		return failed, ErrWorkspaceExchangeUnavailable
+	if err != nil {
+		return failed, WorkspaceExchangeDiagnostic(err)
+	}
+	if base == nil || base.Transport == nil || base.Timeout <= 0 {
+		return failed, workspaceFailure("workspace_exchange_unavailable", 0, nil)
 	}
 	jar, err := cookiejar.New(nil)
 	if err != nil {
@@ -100,15 +108,20 @@ func (e OfficialWorkspaceTokenExchanger) exchangeWorkspace(ctx context.Context, 
 	req.Header.Set("Referer", selectedWorkspaceOrigin+"/")
 	response, err := client.Do(req)
 	if err != nil {
-		return failed, ErrWorkspaceExchangeUnavailable
+		return failed, WorkspaceExchangeDiagnostic(err)
 	}
 	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return failed, ErrWorkspaceExchangeUnavailable
-	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, workspaceExchangeBodyLimit+1))
-	if err != nil || len(body) > workspaceExchangeBodyLimit {
-		return failed, ErrWorkspaceExchangeUnavailable
+	if response.StatusCode != http.StatusOK || response.Header.Get("Cf-Mitigated") == "challenge" || strings.Contains(string(body), "/cdn-cgi/challenge-platform/") {
+		return failed, workspaceHTTPFailure(response, body)
+	}
+	if err != nil {
+		failure := WorkspaceExchangeDiagnostic(err)
+		failure.HTTPStatus = response.StatusCode
+		return failed, failure
+	}
+	if len(body) > workspaceExchangeBodyLimit {
+		return failed, workspaceFailure("platform_response_invalid", response.StatusCode, nil)
 	}
 	var snapshot struct {
 		AccessToken string `json:"accessToken"`
@@ -124,17 +137,44 @@ func (e OfficialWorkspaceTokenExchanger) exchangeWorkspace(ctx context.Context, 
 	if candidateUser != "" {
 		decodeErr = credentialJSON(body, &snapshot)
 	}
-	if decodeErr != nil || snapshot.Account.ID != workspaceID {
-		return failed, ErrWorkspaceExchangeUnavailable
+	if decodeErr != nil {
+		return failed, workspaceFailure("platform_response_invalid", response.StatusCode, nil)
+	}
+	if returnedPersonalWorkspace(snapshot.AccessToken, workspaceID) {
+		if candidateUser != "" {
+			return failed, workspaceFailure("workspace_personal_returned", response.StatusCode, nil)
+		}
+		// A Personal response describes the failed switch, not its cause. Read
+		// current account visibility through the same held route and original
+		// Personal session before attributing it to login or workspace access.
+		discovery, _ := (AccountsCheckDiscovery{Client: func(context.Context) (*http.Client, func(), error) { return base, nil, nil }}).Discover(ctx, personal)
+		if discovery.Failure != nil {
+			return failed, discovery.Failure
+		}
+		if discovery.Status == "discovered" {
+			visible := false
+			for _, workspace := range discovery.Workspaces {
+				visible = visible || workspace.PlatformID == workspaceID
+			}
+			if !visible {
+				return failed, workspaceFailure("workspace_no_longer_visible", http.StatusOK, nil)
+			}
+		}
+		return failed, workspaceFailure("workspace_personal_returned", response.StatusCode, nil)
+	}
+	if snapshot.Account.ID != workspaceID {
+		return failed, workspaceFailure("workspace_mismatch", response.StatusCode, nil)
 	}
 	sessionExpiry, err := time.Parse(time.RFC3339, snapshot.Expires)
 	if err != nil {
-		return failed, ErrWorkspaceExchangeUnavailable
+		return failed, workspaceFailure("platform_response_invalid", response.StatusCode, nil)
 	}
 	now := time.Now().UTC()
 	jwtExpiry, err := workspaceJWTExpiry(snapshot.AccessToken, workspaceID, now)
 	if err != nil {
-		return failed, ErrWorkspaceExchangeUnavailable
+		failure := WorkspaceExchangeDiagnostic(err)
+		failure.HTTPStatus = response.StatusCode
+		return failed, failure
 	}
 	expires := now.Add(24 * time.Hour)
 	if jwtExpiry.Before(expires) {
@@ -145,6 +185,9 @@ func (e OfficialWorkspaceTokenExchanger) exchangeWorkspace(ctx context.Context, 
 	}
 	if personal.ExpiresAt.Before(expires) {
 		expires = personal.ExpiresAt
+	}
+	if !expires.After(now.Add(time.Minute)) {
+		return failed, workspaceFailure("workspace_token_expired", response.StatusCode, nil)
 	}
 	access := WorkspaceAccess{AccessToken: snapshot.AccessToken, WorkspaceID: workspaceID, DeviceID: personal.DeviceID, SessionID: uuid.NewString(), ExpiresAt: expires}
 	for _, cookie := range jar.Cookies(origin) {
@@ -163,9 +206,28 @@ func (e OfficialWorkspaceTokenExchanger) exchangeWorkspace(ctx context.Context, 
 		}
 	}
 	if !ValidateWorkspaceAccess(access, workspaceID, now) {
-		return failed, ErrWorkspaceExchangeUnavailable
+		return failed, workspaceFailure("workspace_token_invalid", response.StatusCode, nil)
 	}
 	return access, nil
+}
+
+func returnedPersonalWorkspace(token, workspaceID string) bool {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 || len(token) > 16384 {
+		return false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	var claims map[string]any
+	if err != nil || json.Unmarshal(payload, &claims) != nil {
+		return false
+	}
+	nested, _ := claims["https://api.openai.com/auth"].(map[string]any)
+	for _, plan := range []string{"free", "plus", "pro"} {
+		if workspaceClaimMatches(claims, nested, "chatgpt_plan_type", plan) && !workspaceClaimMatches(claims, nested, "chatgpt_account_id", workspaceID) {
+			return true
+		}
+	}
+	return false
 }
 
 // JWT claims here are an admission hint, not independent signature proof: the
@@ -173,41 +235,45 @@ func (e OfficialWorkspaceTokenExchanger) exchangeWorkspace(ctx context.Context, 
 func workspaceJWTExpiry(token, workspaceID string, now time.Time) (time.Time, error) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 || len(token) > 16384 || len(parts[1]) == 0 {
-		return time.Time{}, ErrWorkspaceExchangeUnavailable
+		return time.Time{}, workspaceFailure("workspace_token_invalid", 0, nil)
 	}
 	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil || len(payload) > 16384 {
-		return time.Time{}, ErrWorkspaceExchangeUnavailable
+		return time.Time{}, workspaceFailure("workspace_token_invalid", 0, nil)
 	}
 	var expiryClaim struct {
 		Expires json.Number `json:"exp"`
 	}
 	var claims map[string]any
 	if json.Unmarshal(payload, &expiryClaim) != nil || json.Unmarshal(payload, &claims) != nil || claims == nil {
-		return time.Time{}, ErrWorkspaceExchangeUnavailable
+		return time.Time{}, workspaceFailure("workspace_token_invalid", 0, nil)
 	}
 	var authClaims map[string]any
 	if candidate, present := claims["https://api.openai.com/auth"]; present {
 		var ok bool
 		authClaims, ok = candidate.(map[string]any)
 		if !ok {
-			return time.Time{}, ErrWorkspaceExchangeUnavailable
+			return time.Time{}, workspaceFailure("workspace_token_invalid", 0, nil)
 		}
 	}
 	// Admit the same Team/Business plans used by discovery. Conflicting flat
 	// and nested identities, plans or scopes remain invalid.
-	if !workspaceClaimMatches(claims, authClaims, "chatgpt_account_id", workspaceID) ||
-		(!workspaceClaimMatches(claims, authClaims, "chatgpt_plan_type", "team") && !workspaceClaimMatches(claims, authClaims, "chatgpt_plan_type", "business")) ||
-		!workspaceReadScopes(claims, authClaims) {
-		return time.Time{}, ErrWorkspaceExchangeUnavailable
+	if !workspaceClaimMatches(claims, authClaims, "chatgpt_account_id", workspaceID) {
+		return time.Time{}, workspaceFailure("workspace_mismatch", 0, nil)
+	}
+	if !workspaceClaimMatches(claims, authClaims, "chatgpt_plan_type", "team") && !workspaceClaimMatches(claims, authClaims, "chatgpt_plan_type", "business") {
+		return time.Time{}, workspaceFailure("workspace_plan_unsupported", 0, nil)
+	}
+	if !workspaceReadScopes(claims, authClaims) {
+		return time.Time{}, workspaceFailure("workspace_read_scope_missing", 0, nil)
 	}
 	seconds, err := expiryClaim.Expires.Int64()
 	if err != nil {
-		return time.Time{}, ErrWorkspaceExchangeUnavailable
+		return time.Time{}, workspaceFailure("workspace_token_invalid", 0, nil)
 	}
 	expiry := time.Unix(seconds, 0).UTC()
 	if !expiry.After(now.Add(time.Minute)) {
-		return time.Time{}, ErrWorkspaceExchangeUnavailable
+		return time.Time{}, workspaceFailure("workspace_token_expired", 0, nil)
 	}
 	return expiry, nil
 }

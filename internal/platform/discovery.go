@@ -64,6 +64,7 @@ type DiscoveredWorkspace struct {
 type DiscoveryResult struct {
 	Status     string // discovered, session_expired, discovery_failed, permission_denied
 	Workspaces []DiscoveredWorkspace
+	Failure    *WorkspaceExchangeFailure
 }
 
 var ErrDiscoveryUnavailable = errors.New("platform discovery adapter unavailable")
@@ -116,6 +117,9 @@ func validPersonalCookies(s PersonalSession) bool {
 
 // ValidateDiscovery rejects contradictory or unbounded adapter responses before persistence.
 func ValidateDiscovery(result DiscoveryResult) bool {
+	if result.Status == "discovered" && result.Failure != nil {
+		return false
+	}
 	if len(result.Workspaces) > 1000 {
 		return false
 	}

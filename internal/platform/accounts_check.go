@@ -50,25 +50,26 @@ func (a AccountsCheckDiscovery) Discover(ctx context.Context, session PersonalSe
 	req.Header.Set("User-Agent", browserAuthUA)
 	resp, err := client.Do(req)
 	if err != nil {
-		return DiscoveryResult{Status: "discovery_failed"}, nil
+		return DiscoveryResult{Status: "discovery_failed", Failure: WorkspaceExchangeDiagnostic(err)}, nil
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusUnauthorized {
-		return DiscoveryResult{Status: "session_expired"}, nil
-	}
-	if resp.StatusCode == http.StatusForbidden {
-		return DiscoveryResult{Status: "permission_denied"}, nil
-	}
-	if resp.StatusCode != http.StatusOK {
-		return DiscoveryResult{Status: "discovery_failed"}, nil
-	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody+1))
+	if resp.StatusCode != http.StatusOK || resp.Header.Get("Cf-Mitigated") == "challenge" || strings.Contains(string(body), "/cdn-cgi/challenge-platform/") {
+		failure := workspaceHTTPFailure(resp, body)
+		status := "discovery_failed"
+		if failure.Code == "workspace_session_expired" || failure.Code == "workspace_token_revoked" {
+			status = "session_expired"
+		} else if failure.Code == "platform_access_denied" {
+			status = "permission_denied"
+		}
+		return DiscoveryResult{Status: status, Failure: failure}, nil
+	}
 	if err != nil || len(body) > maxResponseBody {
-		return DiscoveryResult{Status: "discovery_failed"}, nil
+		return DiscoveryResult{Status: "discovery_failed", Failure: workspaceFailure("platform_response_invalid", resp.StatusCode, nil)}, nil
 	}
 	workspaces, err := ParseAccountsCheckWorkspaces(body)
 	if err != nil {
-		return DiscoveryResult{Status: "discovery_failed"}, nil
+		return DiscoveryResult{Status: "discovery_failed", Failure: workspaceFailure("platform_response_invalid", resp.StatusCode, nil)}, nil
 	}
 	return DiscoveryResult{Status: "discovered", Workspaces: workspaces}, nil
 }

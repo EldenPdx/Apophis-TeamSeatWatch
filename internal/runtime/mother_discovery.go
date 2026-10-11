@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"time"
@@ -49,7 +50,7 @@ func (h *OwnerAuthHandler) reserveMotherDiscovery(ctx context.Context, id uuid.U
 	if err != nil || !active {
 		return attempt, active, err
 	}
-	err = tx.QueryRow(ctx, `INSERT INTO tsw_mother_discoveries(mother_account_id,run_id,secret_revision,session_generation,status) VALUES ($1,$2,$3,$4,'discovering') ON CONFLICT(mother_account_id) DO UPDATE SET run_id=EXCLUDED.run_id,attempt=tsw_mother_discoveries.attempt+1,secret_revision=EXCLUDED.secret_revision,session_generation=EXCLUDED.session_generation,status='discovering',observed_at=now() RETURNING attempt`, id, uuid.New(), attempt.revision, attempt.generation).Scan(&attempt.attempt)
+	err = tx.QueryRow(ctx, `INSERT INTO tsw_mother_discoveries(mother_account_id,run_id,secret_revision,session_generation,status) VALUES ($1,$2,$3,$4,'discovering') ON CONFLICT(mother_account_id) DO UPDATE SET run_id=EXCLUDED.run_id,attempt=tsw_mother_discoveries.attempt+1,secret_revision=EXCLUDED.secret_revision,session_generation=EXCLUDED.session_generation,status='discovering',failure=NULL,observed_at=now() RETURNING attempt`, id, uuid.New(), attempt.revision, attempt.generation).Scan(&attempt.attempt)
 	if err == nil {
 		_, err = tx.Exec(ctx, `DELETE FROM tsw_selected_workspace_tokens WHERE mother_account_id=$1`, id)
 	}
@@ -81,6 +82,7 @@ func (h *OwnerAuthHandler) RunMotherDiscovery(w http.ResponseWriter, r *http.Req
 	}
 	status := "missing_credentials"
 	var found []platform.DiscoveredWorkspace
+	var failure []byte
 	if attempt.generation != nil && attempt.expires != nil && !attempt.expires.After(time.Now()) {
 		status = "session_expired"
 	}
@@ -103,6 +105,9 @@ func (h *OwnerAuthHandler) RunMotherDiscovery(w http.ResponseWriter, r *http.Req
 				status = "discovery_failed"
 			default:
 				status = result.Status
+				if result.Failure != nil {
+					failure, _ = json.Marshal(platform.WorkspaceExchangeDiagnostic(result.Failure))
+				}
 				if status == "discovered" {
 					found = result.Workspaces
 					if len(found) == 0 {
@@ -147,7 +152,7 @@ func (h *OwnerAuthHandler) RunMotherDiscovery(w http.ResponseWriter, r *http.Req
 		}
 	}
 	var runID uuid.UUID
-	err = tx.QueryRow(r.Context(), `UPDATE tsw_mother_discoveries SET status=$2,observed_at=now() WHERE mother_account_id=$1 AND attempt=$3 RETURNING run_id`, accountID, status, attempt.attempt).Scan(&runID)
+	err = tx.QueryRow(r.Context(), `UPDATE tsw_mother_discoveries SET status=$2,failure=$4,observed_at=now() WHERE mother_account_id=$1 AND attempt=$3 RETURNING run_id`, accountID, status, attempt.attempt, failure).Scan(&runID)
 	for _, item := range found {
 		if err != nil {
 			break
@@ -199,7 +204,8 @@ func motherDiscoverySnapshot(ctx context.Context, tx pgx.Tx, accountID uuid.UUID
 	response := ownerapi.MotherDiscovery{MotherAccountId: accountID, Status: ownerapi.MotherDiscoveryStatusNotVerified, Workspaces: []ownerapi.MotherVisibleWorkspace{}}
 	var status *string
 	var observed *time.Time
-	err := tx.QueryRow(ctx, `SELECT CASE WHEN discovery.status IN ('discovered','empty') AND (session.expires_at IS NULL OR session.expires_at<=now()) THEN NULL WHEN discovery.status='discovering' AND discovery.observed_at<now()-interval '1 minute' THEN 'discovery_failed' ELSE discovery.status END,discovery.observed_at FROM tsw_mother_accounts account JOIN tsw_mother_account_credentials credential ON credential.mother_account_id=account.id LEFT JOIN tsw_mother_discoveries discovery ON discovery.mother_account_id=account.id AND discovery.secret_revision=credential.secret_revision AND discovery.observed_at>now()-interval '7 days' LEFT JOIN tsw_mother_personal_sessions session ON session.mother_account_id=account.id AND session.secret_revision=credential.secret_revision AND session.generation=discovery.session_generation WHERE account.id=$1 AND account.status='active'`, accountID).Scan(&status, &observed)
+	var failure []byte
+	err := tx.QueryRow(ctx, `SELECT CASE WHEN discovery.status IN ('discovered','empty') AND (session.expires_at IS NULL OR session.expires_at<=now()) THEN NULL WHEN discovery.status='discovering' AND discovery.observed_at<now()-interval '1 minute' THEN 'discovery_failed' ELSE discovery.status END,discovery.observed_at,discovery.failure FROM tsw_mother_accounts account JOIN tsw_mother_account_credentials credential ON credential.mother_account_id=account.id LEFT JOIN tsw_mother_discoveries discovery ON discovery.mother_account_id=account.id AND discovery.secret_revision=credential.secret_revision AND discovery.observed_at>now()-interval '7 days' LEFT JOIN tsw_mother_personal_sessions session ON session.mother_account_id=account.id AND session.secret_revision=credential.secret_revision AND session.generation=discovery.session_generation WHERE account.id=$1 AND account.status='active'`, accountID).Scan(&status, &observed, &failure)
 	if err != nil {
 		return response, err
 	}
@@ -208,6 +214,19 @@ func motherDiscoverySnapshot(ctx context.Context, tx pgx.Tx, accountID uuid.UUID
 	}
 	response.Status, response.ObservedAt = ownerapi.MotherDiscoveryStatus(*status), observed
 	if *status != "discovered" {
+		if len(failure) > 0 {
+			var diagnostic platform.WorkspaceExchangeFailure
+			if err := json.Unmarshal(failure, &diagnostic); err != nil {
+				return response, err
+			}
+			encoded, err := json.Marshal(platform.WorkspaceExchangeDiagnostic(&diagnostic))
+			if err != nil {
+				return response, err
+			}
+			if err := json.Unmarshal(encoded, &response.Failure); err != nil {
+				return response, err
+			}
+		}
 		return response, nil
 	}
 	rows, err := tx.Query(ctx, `SELECT workspace.id,workspace.display_name,visibility.access_status FROM tsw_mother_workspace_visibility visibility JOIN tsw_workspaces workspace ON workspace.id=visibility.workspace_id JOIN tsw_mother_discoveries discovery ON discovery.mother_account_id=visibility.mother_account_id AND discovery.run_id=visibility.run_id AND discovery.observed_at>now()-interval '7 days' JOIN tsw_mother_account_credentials credential ON credential.mother_account_id=visibility.mother_account_id AND credential.secret_revision=discovery.secret_revision JOIN tsw_mother_personal_sessions session ON session.mother_account_id=visibility.mother_account_id AND session.secret_revision=credential.secret_revision AND session.generation=discovery.session_generation AND session.expires_at>now() WHERE visibility.mother_account_id=$1 ORDER BY workspace.display_name,workspace.id`, accountID)

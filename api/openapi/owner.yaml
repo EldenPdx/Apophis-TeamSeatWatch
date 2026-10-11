@@ -4077,6 +4077,7 @@ components:
             - not_verified
             - verifying
             - ready
+            - session_expired
             - invalid_login
             - missing_credentials
             - refresh_failed
@@ -4084,10 +4085,13 @@ components:
         checkedAt:
           type: string
           format: date-time
+        failure:
+          $ref: '#/components/schemas/PersonalLoginFailure'
     MotherDiscovery:
       type: object
       additionalProperties: false
       required: [motherAccountId, status, workspaces]
+      description: Current discovery status and classified platform failure, without credential material
       properties:
         motherAccountId:
           type: string
@@ -4107,6 +4111,8 @@ components:
         observedAt:
           type: string
           format: date-time
+        failure:
+          $ref: '#/components/schemas/WorkspaceExchangeFailure'
         workspaces:
           type: array
           items:
@@ -4538,6 +4544,31 @@ components:
         confirmed:
           type: boolean
           enum: [true]
+    WorkspaceExchangeFailure:
+      type: object
+      additionalProperties: false
+      required: [code]
+      properties:
+        code:
+          type: string
+          maxLength: 64
+          description: Classified failure; never upstream bodies, URLs or credentials
+        httpStatus:
+          type: integer
+          minimum: 100
+          maximum: 599
+        upstreamCode:
+          type: string
+          enum: [token_revoked]
+          description: Allowlisted platform reason, present only with a confirmed HTTP 401 token_revoked response
+        routeMode:
+          type: string
+          enum: [direct, required]
+          description: Actual leased route; admission failures describe the requested route
+        proxyScheme:
+          type: string
+          enum: [http, https, socks5, socks5h]
+          description: Set only when this exchange acquired a proxy lease
     SelectedWorkspaceAccessStatus:
       type: object
       additionalProperties: false
@@ -4552,6 +4583,11 @@ components:
         status:
           type: string
           enum: [required, exchanging, ready, failed, permission_denied]
+        checkedAt:
+          type: string
+          format: date-time
+        failure:
+          $ref: '#/components/schemas/WorkspaceExchangeFailure'
         exchangeId:
           type: string
           format: uuid

@@ -4,8 +4,9 @@ import { useEffect, useRef, useState } from 'react';
 import type { components } from '../generated/owner';
 import {
   getMotherDiscovery, getMotherPersonalAccess, listMotherAccounts, ownerProblem,
-  refreshMotherPersonalAccess, runMotherDiscovery, updateMotherAccountMaterial,
+  refreshMotherPersonalAccess, runMotherDiscovery,
 } from './auth';
+import { motherLoginFailure } from './workspaceConnection';
 import { canDiscover } from './workspaceSelection';
 
 export type MotherAccount = components['schemas']['MotherAccount'];
@@ -75,7 +76,7 @@ export function useMotherWorkspaces(active: boolean) {
       if (discovery && ['session_expired', 'missing_credentials', 'unavailable'].includes(discovery.status)) access = null;
       const failures = [accessResult, discoveryResult].filter((result) => result.status === 'rejected');
       const unauthorized = failures.some((result) => result.status === 'rejected' && ownerProblem(result.reason).status === 401);
-      publish(account.id, sequence, { access, discovery, phase: null, notice: unauthorized ? '登录已失效，请重新登录。' : failures.length ? '部分状态读取失败，请重试。' : '' });
+      publish(account.id, sequence, { access, discovery, phase: null, notice: unauthorized ? '登录已失效，请重新登录。' : failures.length ? '部分状态读取失败，请重试。' : access && ['invalid_login', 'missing_credentials', 'refresh_failed', 'unavailable'].includes(access.status) ? motherLoginFailure(access) : '' });
     } catch (error: unknown) {
       if (!signal?.aborted) publish(account.id, sequence, { ...emptyRecord(), notice: ownerProblem(error).status === 401 ? '登录已失效，请重新登录。' : '状态读取失败，请重试。' });
     }
@@ -125,21 +126,8 @@ export function useMotherWorkspaces(active: boolean) {
     } finally { locks.current.delete(account.id); }
   }
 
-  async function correct(account: MotherAccount, password: string, totp: string) {
-    if (locks.current.has(account.id)) return false;
-    locks.current.add(account.id); begin(account.id);
-    try {
-      await updateMotherAccountMaterial(account, password, totp);
-      if (live.current) {
-        setRecords((current) => ({ ...current, [account.id]: emptyRecord() }));
-        setRevision((value) => value + 1);
-      }
-      return true;
-    } finally { locks.current.delete(account.id); }
-  }
-
   return {
-    items, total, page, pageSize, search, loading, readFailed, notice, dismissNotice, records, read, correct,
+    items, total, page, pageSize, search, loading, readFailed, notice, dismissNotice, records, read,
     connect: (account: MotherAccount) => discover(account, true),
     rediscover: (account: MotherAccount) => discover(account, false),
     setSearch: (value: string) => { setSearch(value); setPage(1); },

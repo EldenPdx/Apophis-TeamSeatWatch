@@ -66,6 +66,12 @@ func (f *sequencedSelectedFixture) VerifySelectedWorkspace(ctx context.Context, 
 	}
 }
 
+type workspaceExchangeFailureFixture struct{ failure error }
+
+func (f workspaceExchangeFailureFixture) ExchangeWorkspace(context.Context, platform.PersonalSession, string) (platform.WorkspaceAccess, error) {
+	return platform.WorkspaceAccess{}, f.failure
+}
+
 type sequencedWorkspaceExchange struct {
 	entered, release chan struct{}
 	calls            atomic.Int32
@@ -614,6 +620,45 @@ func TestSelectedWorkspaceFactsIsolatedAcrossMothersAndWorkspaces(t *testing.T) 
 	}
 	if _, restored := call(http.MethodPost, spaceB, motherA, true); restored.Status != "verified" {
 		t.Fatalf("facts retry failed: %+v", restored)
+	}
+
+	// The persisted cause survives a GET and a handler restart. A confirmed
+	// remote 401 invalidates this generation, without changing saved materials.
+	seed(`INSERT INTO tsw_mother_personal_access(mother_account_id,secret_revision,status) VALUES($1,1,'ready') ON CONFLICT(mother_account_id) DO UPDATE SET status='ready'`, motherA)
+	h.workspaceTokenExchanger = workspaceExchangeFailureFixture{&platform.WorkspaceExchangeFailure{Code: "workspace_token_revoked", HTTPStatus: 401, UpstreamCode: "token_revoked", RouteMode: "required", ProxyScheme: "socks5h"}}
+	code, diagnosed, publicBody := callAccess(http.MethodPost, spaceB, motherA, true)
+	if code != 200 || diagnosed.Status != "failed" || diagnosed.Failure == nil || diagnosed.Failure.Code != "workspace_token_revoked" || diagnosed.CheckedAt == nil || strings.Contains(publicBody, "fixture-personal-token") || strings.Contains(publicBody, "fixture-cookie") {
+		t.Fatalf("missing/leaked persisted diagnosis: %d %+v", code, diagnosed)
+	}
+	_, persisted, _ := callAccess(http.MethodGet, spaceB, motherA, false)
+	if persisted.Failure == nil || persisted.Failure.UpstreamCode == nil || *persisted.Failure.UpstreamCode != "token_revoked" || !persisted.CheckedAt.Equal(*diagnosed.CheckedAt) {
+		t.Fatalf("GET lost revocation: %+v", persisted)
+	}
+	personalState, stateErr := h.motherPersonalAccess(httptest.NewRequest(http.MethodGet, "/", nil), motherA)
+	if stateErr != nil || personalState.Status != "session_expired" {
+		t.Fatalf("revoked generation still says ready: %+v %v", personalState, stateErr)
+	}
+	// A delayed old diagnosis cannot mark a newly logged-in generation invalid.
+	reserved, reserveErr := h.reserveWorkspaceTokenExchange(ctx, spaceB, motherA)
+	if reserveErr != nil {
+		t.Fatal(reserveErr)
+	}
+	freshGeneration := uuid.New()
+	seed(`UPDATE tsw_mother_personal_sessions SET generation=$2 WHERE mother_account_id=$1`, motherA, freshGeneration)
+	seed(`UPDATE tsw_mother_discoveries SET session_generation=$2 WHERE mother_account_id=$1`, motherA, freshGeneration)
+	seed(`UPDATE tsw_mother_personal_access SET status='ready' WHERE mother_account_id=$1`, motherA)
+	finishErr := h.finishWorkspaceTokenExchange(ctx, reserved, platform.WorkspaceAccess{}, &platform.WorkspaceExchangeFailure{Code: "workspace_token_revoked", HTTPStatus: 401, UpstreamCode: "token_revoked"})
+	if !errors.Is(finishErr, errSelectedAttemptSuperseded) {
+		t.Fatalf("stale revocation published: %v", finishErr)
+	}
+	personalState, stateErr = h.motherPersonalAccess(httptest.NewRequest(http.MethodGet, "/", nil), motherA)
+	if stateErr != nil || personalState.Status != "ready" {
+		t.Fatal("stale failure invalidated fresh login")
+	}
+	h.workspaceTokenExchanger = officialExchanger
+	_, repairedAccess, _ := callAccess(http.MethodPost, spaceB, motherA, true)
+	if repairedAccess.Status != "ready" || repairedAccess.Failure != nil {
+		t.Fatalf("successful retry retained failure: %+v", repairedAccess)
 	}
 	// Revision change during network I/O revokes the reserved token publication.
 	lateExchange := &sequencedWorkspaceExchange{entered: make(chan struct{}), release: make(chan struct{})}

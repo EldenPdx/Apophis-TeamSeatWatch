@@ -12,7 +12,7 @@
     "build:owner": "vite build --config vite.owner.config.ts",
     "build:public": "vite build --config vite.public.config.ts",
     "typecheck": "tsc --noEmit",
-    "test": "node --test tools/owner-auth-contract.test.mjs tools/child-materials-interaction.test.mjs tools/workspace-discovery.test.mjs tools/delivery-destination-contract.test.mjs tools/standby-child-batches-interaction.test.mjs tools/workspace-verification.test.mjs tools/personal-probe-scope.test.mjs tools/operation-wizard.test.mjs tools/public-redeem.test.mjs",
+    "test": "node --test tools/owner-auth-contract.test.mjs tools/child-materials-interaction.test.mjs tools/workspace-discovery.test.mjs tools/delivery-destination-contract.test.mjs tools/standby-child-batches-interaction.test.mjs tools/workspace-verification.test.mjs tools/workspace-connection.test.mjs tools/personal-probe-scope.test.mjs tools/operation-wizard.test.mjs tools/public-redeem.test.mjs",
     "lint": "eslint src",
     "generate:contracts": "node ../tools/generate.mjs --write",
     "check:contracts": "node ../tools/generate.mjs --check"

@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"time"
@@ -59,7 +60,7 @@ func (h *OwnerAuthHandler) ExchangeSelectedWorkspaceToken(w http.ResponseWriter,
 		access, err = h.workspaceTokenExchanger.ExchangeWorkspace(ctx, attempt.personal, attempt.platformID)
 		cancel()
 	} else {
-		err = platform.ErrWorkspaceExchangeUnavailable
+		err = &platform.WorkspaceExchangeFailure{Code: "workspace_session_invalid"}
 	}
 	if err == nil && !platform.ValidateWorkspaceAccess(access, attempt.platformID, time.Now()) {
 		err = platform.ErrWorkspaceExchangeUnavailable
@@ -101,7 +102,7 @@ func (h *OwnerAuthHandler) reserveWorkspaceTokenExchange(ctx context.Context, wo
 	err = tx.QueryRow(ctx, `INSERT INTO tsw_selected_workspace_tokens(mother_account_id,workspace_id,discovery_run_id,session_generation,secret_revision,exchange_id,status)
 		VALUES($1,$2,$3,$4,$5,$6,'exchanging') ON CONFLICT(mother_account_id,workspace_id) DO UPDATE SET
 		discovery_run_id=EXCLUDED.discovery_run_id,session_generation=EXCLUDED.session_generation,secret_revision=EXCLUDED.secret_revision,
-		attempt=tsw_selected_workspace_tokens.attempt+1,exchange_id=EXCLUDED.exchange_id,status='exchanging',key_version=NULL,nonce=NULL,sealed_access=NULL,expires_at=NULL,updated_at=now()
+		attempt=tsw_selected_workspace_tokens.attempt+1,exchange_id=EXCLUDED.exchange_id,status='exchanging',key_version=NULL,nonce=NULL,sealed_access=NULL,expires_at=NULL,failure=NULL,updated_at=now()
 		RETURNING attempt`, motherID, workspaceID, attempt.binding.run, attempt.binding.generation, attempt.binding.revision, attempt.binding.exchangeID).Scan(&attempt.binding.attempt)
 	if err != nil {
 		return attempt, err
@@ -148,6 +149,7 @@ func (h *OwnerAuthHandler) finishWorkspaceTokenExchange(ctx context.Context, att
 	status := "failed"
 	var keyVersion *int16
 	var nonce, sealed []byte
+	var failure []byte
 	var expiry *time.Time
 	if exchangeErr == nil {
 		version, nonceValue, ciphertext, sealErr := sealWorkspaceAccess(h.keyRing, b, access)
@@ -157,8 +159,25 @@ func (h *OwnerAuthHandler) finishWorkspaceTokenExchange(ctx context.Context, att
 		v := int16(version)
 		keyVersion, nonce, sealed, expiry = &v, nonceValue, ciphertext, &access.ExpiresAt
 		status = "ready"
+	} else {
+		diagnostic := platform.WorkspaceExchangeDiagnostic(exchangeErr)
+		failure, err = json.Marshal(diagnostic)
+		if err != nil {
+			return err
+		}
+		if diagnostic.HTTPStatus == http.StatusUnauthorized && (diagnostic.Code == "workspace_token_revoked" || diagnostic.Code == "workspace_session_expired") {
+			// The scope locks above fence this observation to the exact Personal
+			// generation. Preserve the attempt for GET and the stored materials
+			// for a full login; never invalidate a newer login from a stale result.
+			_, err = tx.Exec(ctx, `INSERT INTO tsw_mother_personal_access(mother_account_id,secret_revision,status)
+				VALUES($1,$2,'session_expired') ON CONFLICT(mother_account_id) DO UPDATE SET status='session_expired',checked_at=now()
+				WHERE tsw_mother_personal_access.secret_revision=$2 AND tsw_mother_personal_access.status<>'verifying'`, b.motherID, b.revision)
+			if err != nil {
+				return err
+			}
+		}
 	}
-	_, err = tx.Exec(ctx, `UPDATE tsw_selected_workspace_tokens SET status=$3,key_version=$4,nonce=$5,sealed_access=$6,expires_at=$7,updated_at=now() WHERE mother_account_id=$1 AND workspace_id=$2 AND attempt=$8 AND exchange_id=$9 AND status='exchanging'`, b.motherID, b.workspaceID, status, keyVersion, nonce, sealed, expiry, b.attempt, b.exchangeID)
+	_, err = tx.Exec(ctx, `UPDATE tsw_selected_workspace_tokens SET status=$3,key_version=$4,nonce=$5,sealed_access=$6,expires_at=$7,failure=$10,updated_at=now() WHERE mother_account_id=$1 AND workspace_id=$2 AND attempt=$8 AND exchange_id=$9 AND status='exchanging'`, b.motherID, b.workspaceID, status, keyVersion, nonce, sealed, expiry, b.attempt, b.exchangeID, failure)
 	if err != nil {
 		return err
 	}
@@ -189,14 +208,15 @@ func (h *OwnerAuthHandler) selectedWorkspaceAccess(ctx context.Context, workspac
 	var updated time.Time
 	var expires *time.Time
 	var keyVersion *int16
-	var nonce, sealed []byte
-	err = tx.QueryRow(ctx, `SELECT status,attempt,exchange_id,updated_at,expires_at,key_version,nonce,sealed_access FROM tsw_selected_workspace_tokens WHERE mother_account_id=$1 AND workspace_id=$2 AND discovery_run_id=$3 AND session_generation=$4 AND secret_revision=$5`, motherID, workspaceID, b.run, b.generation, b.revision).Scan(&status, &b.attempt, &b.exchangeID, &updated, &expires, &keyVersion, &nonce, &sealed)
+	var nonce, sealed, failure []byte
+	err = tx.QueryRow(ctx, `SELECT status,attempt,exchange_id,updated_at,expires_at,key_version,nonce,sealed_access,failure FROM tsw_selected_workspace_tokens WHERE mother_account_id=$1 AND workspace_id=$2 AND discovery_run_id=$3 AND session_generation=$4 AND secret_revision=$5`, motherID, workspaceID, b.run, b.generation, b.revision).Scan(&status, &b.attempt, &b.exchangeID, &updated, &expires, &keyVersion, &nonce, &sealed, &failure)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return result, tx.Commit(ctx)
 	}
 	if err != nil {
 		return result, err
 	}
+	result.CheckedAt = &updated
 	switch status {
 	case "exchanging":
 		if updated.After(time.Now().Add(-time.Minute)) {
@@ -206,6 +226,19 @@ func (h *OwnerAuthHandler) selectedWorkspaceAccess(ctx context.Context, workspac
 		}
 	case "failed":
 		result.Status = "failed"
+		if len(failure) > 0 {
+			var diagnostic platform.WorkspaceExchangeFailure
+			if err := json.Unmarshal(failure, &diagnostic); err != nil {
+				return result, err
+			}
+			encoded, err := json.Marshal(platform.WorkspaceExchangeDiagnostic(&diagnostic))
+			if err != nil {
+				return result, err
+			}
+			if err := json.Unmarshal(encoded, &result.Failure); err != nil {
+				return result, err
+			}
+		}
 	case "ready":
 		if expires != nil && expires.After(time.Now().Add(30*time.Second)) && keyVersion != nil {
 			access, openErr := openWorkspaceAccess(h.keyRing, b, uint16(*keyVersion), nonce, sealed)

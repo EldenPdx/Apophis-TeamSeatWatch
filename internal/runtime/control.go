@@ -85,7 +85,7 @@ func NewControlHandlers(config ControlConfig) (ControlHandlers, error) {
 		Discovery:               platform.AccountsCheckDiscovery{Client: leaseClient},
 		PersonalRefresh:         platform.PersonalWebRefresher{Client: leaseClient, Browser: platform.NewPersonalBrowser},
 		SelectedWorkspaceReader: platform.OfficialSelectedWorkspaceReader{Client: leaseClient},
-		WorkspaceTokenExchanger: platform.OfficialWorkspaceTokenExchanger{Client: leaseClient},
+		WorkspaceTokenExchanger: leasedWorkspaceTokenExchanger{egress: config.Egress},
 		WorkspaceMemberRemover:  platform.OfficialWorkspaceMemberRemover{Client: leaseClient},
 	})
 	if err != nil {

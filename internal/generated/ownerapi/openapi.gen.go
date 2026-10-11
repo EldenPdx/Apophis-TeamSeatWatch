@@ -1252,6 +1252,7 @@ const (
 	MotherPersonalAccessStatusNotVerified        MotherPersonalAccessStatus = "not_verified"
 	MotherPersonalAccessStatusReady              MotherPersonalAccessStatus = "ready"
 	MotherPersonalAccessStatusRefreshFailed      MotherPersonalAccessStatus = "refresh_failed"
+	MotherPersonalAccessStatusSessionExpired     MotherPersonalAccessStatus = "session_expired"
 	MotherPersonalAccessStatusUnavailable        MotherPersonalAccessStatus = "unavailable"
 	MotherPersonalAccessStatusVerifying          MotherPersonalAccessStatus = "verifying"
 )
@@ -1268,6 +1269,8 @@ func (e MotherPersonalAccessStatus) Valid() bool {
 	case MotherPersonalAccessStatusReady:
 		return true
 	case MotherPersonalAccessStatusRefreshFailed:
+		return true
+	case MotherPersonalAccessStatusSessionExpired:
 		return true
 	case MotherPersonalAccessStatusUnavailable:
 		return true
@@ -2553,6 +2556,63 @@ func (e WorkspaceOperationalState) Valid() bool {
 	case WorkspaceOperationalStateOperational:
 		return true
 	case WorkspaceOperationalStateUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for WorkspaceExchangeFailureProxyScheme.
+const (
+	WorkspaceExchangeFailureProxySchemeHttp    WorkspaceExchangeFailureProxyScheme = "http"
+	WorkspaceExchangeFailureProxySchemeHttps   WorkspaceExchangeFailureProxyScheme = "https"
+	WorkspaceExchangeFailureProxySchemeSocks5  WorkspaceExchangeFailureProxyScheme = "socks5"
+	WorkspaceExchangeFailureProxySchemeSocks5h WorkspaceExchangeFailureProxyScheme = "socks5h"
+)
+
+// Valid indicates whether the value is a known member of the WorkspaceExchangeFailureProxyScheme enum.
+func (e WorkspaceExchangeFailureProxyScheme) Valid() bool {
+	switch e {
+	case WorkspaceExchangeFailureProxySchemeHttp:
+		return true
+	case WorkspaceExchangeFailureProxySchemeHttps:
+		return true
+	case WorkspaceExchangeFailureProxySchemeSocks5:
+		return true
+	case WorkspaceExchangeFailureProxySchemeSocks5h:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for WorkspaceExchangeFailureRouteMode.
+const (
+	WorkspaceExchangeFailureRouteModeDirect   WorkspaceExchangeFailureRouteMode = "direct"
+	WorkspaceExchangeFailureRouteModeRequired WorkspaceExchangeFailureRouteMode = "required"
+)
+
+// Valid indicates whether the value is a known member of the WorkspaceExchangeFailureRouteMode enum.
+func (e WorkspaceExchangeFailureRouteMode) Valid() bool {
+	switch e {
+	case WorkspaceExchangeFailureRouteModeDirect:
+		return true
+	case WorkspaceExchangeFailureRouteModeRequired:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for WorkspaceExchangeFailureUpstreamCode.
+const (
+	TokenRevoked WorkspaceExchangeFailureUpstreamCode = "token_revoked"
+)
+
+// Valid indicates whether the value is a known member of the WorkspaceExchangeFailureUpstreamCode enum.
+func (e WorkspaceExchangeFailureUpstreamCode) Valid() bool {
+	switch e {
+	case TokenRevoked:
 		return true
 	default:
 		return false
@@ -4038,12 +4098,13 @@ type MotherAccountList struct {
 	Total    int64           `json:"total"`
 }
 
-// MotherDiscovery defines model for MotherDiscovery.
+// MotherDiscovery Current discovery status and classified platform failure, without credential material
 type MotherDiscovery struct {
-	MotherAccountId openapi_types.UUID       `json:"motherAccountId"`
-	ObservedAt      *time.Time               `json:"observedAt,omitempty"`
-	Status          MotherDiscoveryStatus    `json:"status"`
-	Workspaces      []MotherVisibleWorkspace `json:"workspaces"`
+	Failure         *WorkspaceExchangeFailure `json:"failure,omitempty"`
+	MotherAccountId openapi_types.UUID        `json:"motherAccountId"`
+	ObservedAt      *time.Time                `json:"observedAt,omitempty"`
+	Status          MotherDiscoveryStatus     `json:"status"`
+	Workspaces      []MotherVisibleWorkspace  `json:"workspaces"`
 }
 
 // MotherDiscoveryStatus defines model for MotherDiscovery.Status.
@@ -4052,6 +4113,7 @@ type MotherDiscoveryStatus string
 // MotherPersonalAccess defines model for MotherPersonalAccess.
 type MotherPersonalAccess struct {
 	CheckedAt       *time.Time                 `json:"checkedAt,omitempty"`
+	Failure         *PersonalLoginFailure      `json:"failure,omitempty"`
 	MotherAccountId openapi_types.UUID         `json:"motherAccountId"`
 	Status          MotherPersonalAccessStatus `json:"status"`
 }
@@ -4746,8 +4808,10 @@ type SaveBatch struct {
 
 // SelectedWorkspaceAccessStatus defines model for SelectedWorkspaceAccessStatus.
 type SelectedWorkspaceAccessStatus struct {
+	CheckedAt       *time.Time                          `json:"checkedAt,omitempty"`
 	ExchangeId      *openapi_types.UUID                 `json:"exchangeId,omitempty"`
 	ExpiresAt       *time.Time                          `json:"expiresAt,omitempty"`
+	Failure         *WorkspaceExchangeFailure           `json:"failure,omitempty"`
 	MotherAccountId openapi_types.UUID                  `json:"motherAccountId"`
 	Status          SelectedWorkspaceAccessStatusStatus `json:"status"`
 	WorkspaceId     openapi_types.UUID                  `json:"workspaceId"`
@@ -5205,6 +5269,31 @@ type WorkspaceDetail struct {
 	SnapshotSourceKind     *string                `json:"snapshotSourceKind,omitempty"`
 	Workspace              Workspace              `json:"workspace"`
 }
+
+// WorkspaceExchangeFailure defines model for WorkspaceExchangeFailure.
+type WorkspaceExchangeFailure struct {
+	// Code Classified failure; never upstream bodies, URLs or credentials
+	Code       string `json:"code"`
+	HttpStatus *int   `json:"httpStatus,omitempty"`
+
+	// ProxyScheme Set only when this exchange acquired a proxy lease
+	ProxyScheme *WorkspaceExchangeFailureProxyScheme `json:"proxyScheme,omitempty"`
+
+	// RouteMode Actual leased route; admission failures describe the requested route
+	RouteMode *WorkspaceExchangeFailureRouteMode `json:"routeMode,omitempty"`
+
+	// UpstreamCode Allowlisted platform reason, present only with a confirmed HTTP 401 token_revoked response
+	UpstreamCode *WorkspaceExchangeFailureUpstreamCode `json:"upstreamCode,omitempty"`
+}
+
+// WorkspaceExchangeFailureProxyScheme Set only when this exchange acquired a proxy lease
+type WorkspaceExchangeFailureProxyScheme string
+
+// WorkspaceExchangeFailureRouteMode Actual leased route; admission failures describe the requested route
+type WorkspaceExchangeFailureRouteMode string
+
+// WorkspaceExchangeFailureUpstreamCode Allowlisted platform reason, present only with a confirmed HTTP 401 token_revoked response
+type WorkspaceExchangeFailureUpstreamCode string
 
 // WorkspaceList defines model for WorkspaceList.
 type WorkspaceList struct {

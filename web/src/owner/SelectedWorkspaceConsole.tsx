@@ -1,6 +1,6 @@
 import ActionNotice from '../shared/ActionNotice';
 import { Box, Button, Group, Paper, Stack, Table, Tabs, Text } from '@mantine/core';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import ListPagination from '../shared/ListPagination';
 import StatusBadge from '../shared/StatusBadge';
 import OwnerIcon from './OwnerIcon';
@@ -9,12 +9,13 @@ import { formatDateTime } from '../shared/dateTime';
 import { useSelectedWorkspace } from './useSelectedWorkspace';
 import { seatTypeLabel } from './seatTypes';
 import { canShowSelectedWorkspaceReadSource, workspaceSubscriptionState } from './workspaceVerification';
+import { workspaceConnectionFeedback, workspaceSyncProgress } from './workspaceConnection';
 
 const roleLabels: Record<string, string> = { 'account-owner': '所有者', 'account-admin': '管理员', owner: '所有者', 'primary-owner': '所有者', admin: '管理员', administrator: '管理员', member: '成员', 'standard-user': '成员' };
 const date = (value?: string) => value ? formatDateTime(value) : '未获取';
 const role = (value?: string) => value ? roleLabels[value] ?? '未知' : '未获取';
 
-export default function SelectedWorkspaceConsole({ motherAccountId, workspaceId, onNextAction }: { motherAccountId: string; workspaceId: string; onNextAction: () => void }) {
+export default function SelectedWorkspaceConsole({ motherAccountId, workspaceId, onNextAction, onMotherChanged }: { motherAccountId: string; workspaceId: string; onNextAction: () => void; onMotherChanged: () => void }) {
   const state = useSelectedWorkspace(motherAccountId, workspaceId);
   const [tab, setTab] = useState<string | null>('overview');
   const { facts, ready, pending, loading } = state;
@@ -25,10 +26,21 @@ export default function SelectedWorkspaceConsole({ motherAccountId, workspaceId,
   const value = (data: string | number | undefined) => current ? data ?? '未获取' : '未同步';
   const permission = current ? facts?.canManage ? '可管理' : '可读取' : facts?.status === 'permission_denied' ? '权限不足' : '待核验';
   const chooseTab = (next: string | null) => { setTab(next); state.setKind(next === 'invites' ? 'pending_invite' : 'member'); };
+  const connectionFailure = !pending && !loading ? state.syncFailure || (state.access?.status === 'failed' ? workspaceConnectionFeedback(state.access) : '') : '';
+  const invalidation = useRef('');
+  useEffect(() => {
+    const failure = state.access?.failure;
+    if (!state.motherRevision && (failure?.httpStatus !== 401 || !['workspace_token_revoked', 'workspace_session_expired'].includes(failure.code))) return;
+    const observation = `${motherAccountId}:${state.motherRevision}:${state.access?.checkedAt}:${failure?.code}`;
+    if (invalidation.current === observation) return;
+    invalidation.current = observation; onMotherChanged();
+  }, [motherAccountId, state.access, state.motherRevision, onMotherChanged]);
 
   return <Stack gap={20} className="workspace-modal-details records-detail">
     <Group justify="space-between"><Group gap={8}><StatusBadge tone={current ? 'success' : 'warning'} label={pending ? '同步中' : current ? '已同步' : subscriptionCurrent || seatCountsCurrent ? '部分已同步' : '未同步'} /><StatusBadge tone={current ? 'gray' : 'warning'} label={permission} /></Group><Button variant="default" size="sm" leftSection={<OwnerIcon name="refresh" size={16} />} loading={pending} disabled={pending || loading} onClick={() => void state.sync()}>同步空间</Button></Group>
-    <ActionNotice message={state.notice} tone={state.noticeTone} onClose={state.dismissNotice} />
+    <ActionNotice message={connectionFailure ? '' : state.notice} tone={state.noticeTone} onClose={state.dismissNotice} />
+    {connectionFailure ? <Box role="alert"><Text size="sm" c="error">{connectionFailure}</Text>{state.access?.checkedAt ? <Text size="xs" c="dimmed" mt={4}>上次连接：{formatDateTime(state.access.checkedAt)}</Text> : null}</Box> : null}
+    {pending ? <Text size="sm" c="dimmed" role="status">{workspaceSyncProgress[state.syncStage]}</Text> : null}
     <Tabs value={tab} onChange={chooseTab}>
       <Tabs.List><Tabs.Tab disabled={pending} value="overview">概览</Tabs.Tab><Tabs.Tab disabled={pending} value="members">成员{facts?.memberCount !== undefined ? ` ${facts.memberCount}` : ''}</Tabs.Tab><Tabs.Tab disabled={pending} value="invites">待接受账号{facts?.pendingInviteCount !== undefined ? ` ${facts.pendingInviteCount}` : ''}</Tabs.Tab></Tabs.List>
       <Tabs.Panel value="overview" pt={20}><Stack gap={20}>

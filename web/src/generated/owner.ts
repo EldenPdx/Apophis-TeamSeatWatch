@@ -2161,10 +2161,12 @@ export interface components {
             /** Format: uuid */
             motherAccountId: string;
             /** @enum {string} */
-            status: "not_verified" | "verifying" | "ready" | "invalid_login" | "missing_credentials" | "refresh_failed" | "unavailable";
+            status: "not_verified" | "verifying" | "ready" | "session_expired" | "invalid_login" | "missing_credentials" | "refresh_failed" | "unavailable";
             /** Format: date-time */
             checkedAt?: string;
+            failure?: components["schemas"]["PersonalLoginFailure"];
         };
+        /** @description Current discovery status and classified platform failure, without credential material */
         MotherDiscovery: {
             /** Format: uuid */
             motherAccountId: string;
@@ -2172,6 +2174,7 @@ export interface components {
             status: "not_verified" | "discovering" | "discovered" | "empty" | "session_expired" | "missing_credentials" | "discovery_failed" | "permission_denied" | "unavailable";
             /** Format: date-time */
             observedAt?: string;
+            failure?: components["schemas"]["WorkspaceExchangeFailure"];
             workspaces: components["schemas"]["MotherVisibleWorkspace"][];
         };
         MotherVisibleWorkspace: {
@@ -2340,6 +2343,26 @@ export interface components {
             /** @enum {boolean} */
             confirmed: true;
         };
+        WorkspaceExchangeFailure: {
+            /** @description Classified failure; never upstream bodies, URLs or credentials */
+            code: string;
+            httpStatus?: number;
+            /**
+             * @description Allowlisted platform reason, present only with a confirmed HTTP 401 token_revoked response
+             * @enum {string}
+             */
+            upstreamCode?: "token_revoked";
+            /**
+             * @description Actual leased route; admission failures describe the requested route
+             * @enum {string}
+             */
+            routeMode?: "direct" | "required";
+            /**
+             * @description Set only when this exchange acquired a proxy lease
+             * @enum {string}
+             */
+            proxyScheme?: "http" | "https" | "socks5" | "socks5h";
+        };
         SelectedWorkspaceAccessStatus: {
             /** Format: uuid */
             workspaceId: string;
@@ -2347,6 +2370,9 @@ export interface components {
             motherAccountId: string;
             /** @enum {string} */
             status: "required" | "exchanging" | "ready" | "failed" | "permission_denied";
+            /** Format: date-time */
+            checkedAt?: string;
+            failure?: components["schemas"]["WorkspaceExchangeFailure"];
             /** Format: uuid */
             exchangeId?: string;
             /** Format: date-time */
