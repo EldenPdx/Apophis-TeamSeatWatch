@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"sync"
-	"time"
 )
 
 // LeaseProvider is the narrow, already-verified route required by a platform attempt.
@@ -32,33 +31,30 @@ func NewManager(pool *LeaseManager, status Status) *Manager {
 	if pool != nil {
 		router = pool.router
 	}
-	return &Manager{pool: pool, status: status, router: router, limit: 3, capacity: make(chan struct{})}
+	return &Manager{pool: pool, status: status, router: router, limit: 5, capacity: make(chan struct{})}
 }
 
 func (m *Manager) Acquire(ctx context.Context) (*Lease, error) {
 	if m == nil || m.pool == nil {
 		return nil, ErrLeaseExhausted
 	}
-	waiting, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
 	for {
 		m.mu.RLock()
 		limit := m.limit
 		changed := m.capacity
-		canWait := m.onChange != nil
 		m.mu.RUnlock()
-		lease, err := m.pool.acquire(waiting, limit)
+		lease, err := m.pool.acquire(ctx, limit)
 		if err == nil {
 			lease.onRelease = m.signalChange
 			return lease, nil
 		}
 		m.signalRefill()
-		if !errors.Is(err, ErrLeaseExhausted) || !canWait || m.ActiveCount() == 0 {
+		if !errors.Is(err, ErrLeaseExhausted) || m.ActiveCount() == 0 {
 			return nil, err
 		}
 		select {
-		case <-waiting.Done():
-			return nil, waiting.Err()
+		case <-ctx.Done():
+			return nil, ctx.Err()
 		case <-changed:
 		}
 	}

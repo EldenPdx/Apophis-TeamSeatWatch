@@ -2,13 +2,14 @@ package platform
 
 import (
 	"context"
+	"github.com/xft0202/Apophis-TeamSeatWatch/internal/browserenv"
 	"time"
 )
 
 // PersonalSessionRenewer checks saved browser cookies without submitting login materials.
 // invalid_login is returned only when the platform confirms that session is gone.
 type PersonalSessionRenewer interface {
-	RenewPersonal(context.Context, PersonalSession) (PersonalRefreshResult, error)
+	RenewPersonal(context.Context, PersonalSession, browserenv.Environment) (PersonalRefreshResult, error)
 }
 
 // AcquirePersonal is the common login policy for explicit account actions.
@@ -22,7 +23,7 @@ func AcquirePersonal(ctx context.Context, adapter PersonalSessionRefresher, mate
 		if !ok {
 			return PersonalRefreshResult{Status: "refresh_failed"}, ErrPersonalRefreshUnavailable
 		}
-		result, err := renewer.RenewPersonal(ctx, saved)
+		result, err := renewer.RenewPersonal(ctx, saved, material.Environment)
 		if err != nil || result.Status != "invalid_login" {
 			return result, err
 		}

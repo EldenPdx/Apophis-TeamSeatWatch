@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/xft0202/Apophis-TeamSeatWatch/internal/browserenv"
 	"io"
 	"net/http"
 	"sort"
@@ -11,7 +12,7 @@ import (
 	"time"
 )
 
-const accountsCheckURL = "https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27?timezone_offset_min=-480"
+const accountsCheckURL = "https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27?timezone_offset_min=0"
 
 // DiscoveryClient leases one already-admitted transport for this read attempt.
 // A production caller must supply an egress lease, not http.DefaultClient.
@@ -48,6 +49,7 @@ func (a AccountsCheckDiscovery) Discover(ctx context.Context, session PersonalSe
 	req.Header.Set("Authorization", "Bearer "+session.AccessToken)
 	req.Header.Set("oai-device-id", session.DeviceID)
 	req.Header.Set("User-Agent", browserAuthUA)
+	req.Header.Set("Accept-Language", browserenv.AcceptLanguage)
 	resp, err := client.Do(req)
 	if err != nil {
 		return DiscoveryResult{Status: "discovery_failed", Failure: WorkspaceExchangeDiagnostic(err)}, nil

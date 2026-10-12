@@ -11,12 +11,36 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/xft0202/Apophis-TeamSeatWatch/internal/auth"
+	"github.com/xft0202/Apophis-TeamSeatWatch/internal/browserenv"
 	"github.com/xft0202/Apophis-TeamSeatWatch/internal/platform"
 	targetdomain "github.com/xft0202/Apophis-TeamSeatWatch/internal/target"
 )
 
 var ErrDisabled = errors.New("account disabled")
 var ErrChanged = errors.New("account session reservation superseded")
+
+// Environment resolves identity for the existing reclaim reservation, whose
+// full-login adapter owns authentication. It uses the same active-account lock
+// and lazy assignment as Ensure, without changing any encrypted generation.
+func (s Store) Environment(ctx context.Context, id uuid.UUID) (browserenv.Environment, error) {
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return browserenv.Environment{}, err
+	}
+	defer tx.Rollback(ctx)
+	var active bool
+	if err = tx.QueryRow(ctx, `SELECT status='active' FROM tsw_target_accounts WHERE id=$1 FOR UPDATE`, id).Scan(&active); err != nil {
+		return browserenv.Environment{}, err
+	}
+	if !active {
+		return browserenv.Environment{}, ErrDisabled
+	}
+	e, err := browserenv.Ensure(ctx, tx, "target", id)
+	if err != nil {
+		return browserenv.Environment{}, err
+	}
+	return e, tx.Commit(ctx)
+}
 
 // InvalidATSQL is generation-safe because Personal probe publication holds the
 // generation locks and a replacement advances verified_at atomically.
@@ -27,9 +51,10 @@ type Store struct {
 	KeyRing auth.KeyRing
 }
 type Result struct {
-	Status  string
-	Session platform.PersonalSession
-	Failure *platform.PersonalRefreshFailure
+	Environment browserenv.Environment
+	Status      string
+	Session     platform.PersonalSession
+	Failure     *platform.PersonalRefreshFailure
 }
 type reservation struct {
 	material          platform.MotherMaterial
@@ -43,15 +68,15 @@ type reservation struct {
 // fresh is used only after a browser authorization explicitly rejects its session.
 // published runs in the successful publication transaction (e.g. Owner rotation).
 func (s Store) Ensure(ctx context.Context, id uuid.UUID, adapter platform.PersonalSessionRefresher, fresh bool, published func(pgx.Tx) error) (Result, error) {
-	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
-	defer cancel()
 	r, err := s.reserve(ctx, id, fresh)
 	if err != nil {
 		return Result{}, err
 	}
 	if r.existing != "" {
-		return Result{Status: r.existing, Session: r.saved}, nil
+		return Result{Environment: r.material.Environment, Status: r.existing, Session: r.saved}, nil
 	}
+	stopHeartbeat := KeepVerifying(ctx, s.Pool, "target", id, r.revision, r.attempt)
+	defer stopHeartbeat()
 	result := platform.PersonalRefreshResult{Status: "missing_credentials"}
 	if r.complete {
 		if adapter == nil {
@@ -69,10 +94,12 @@ func (s Store) Ensure(ctx context.Context, id uuid.UUID, adapter platform.Person
 			result = platform.PersonalRefreshResult{Status: "refresh_failed"}
 		}
 	}
-	if err = s.publish(ctx, id, r, result, published); err != nil {
+	publishCtx, stopPublish := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer stopPublish()
+	if err = s.publish(publishCtx, id, r, result, published); err != nil {
 		return Result{}, err
 	}
-	return Result{Status: result.Status, Session: result.Session, Failure: result.Failure}, nil
+	return Result{Environment: r.material.Environment, Status: result.Status, Session: result.Session, Failure: result.Failure}, nil
 }
 
 func lockOwnerAction(ctx context.Context, tx pgx.Tx) error {
@@ -95,6 +122,10 @@ func (s Store) reserve(ctx context.Context, id uuid.UUID, fresh bool) (reservati
 	}
 	if !active {
 		return r, ErrDisabled
+	}
+	r.material.Environment, err = browserenv.Ensure(ctx, tx, "target", id)
+	if err != nil {
+		return r, err
 	}
 	var status *string
 	var checked *time.Time

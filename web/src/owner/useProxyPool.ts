@@ -21,7 +21,7 @@ export default function useProxyPool(active: boolean) {
   const [manual, setManual] = useState('');
   const [targetHealthy, setTargetHealthy] = useState(5);
   const [probeConcurrency, setProbeConcurrency] = useState(5);
-  const [taskConcurrency, setTaskConcurrency] = useState(3);
+  const [taskConcurrency, setTaskConcurrency] = useState(5);
   const [removing, setRemoving] = useState<ProxyNode | null>(null);
   const locked = useRef(false);
   const reads = useRef<AbortController | null>(null);

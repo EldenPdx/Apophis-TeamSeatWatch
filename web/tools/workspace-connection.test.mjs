@@ -13,6 +13,7 @@ function fixture(overrides = {}) {
     motherId, workspaceId, access: null,
     exchange: async (space, mother) => { calls.push(['exchange', space, mother]); return exchanges++ ? ready : revoked; },
     login: async mother => { calls.push(['login', mother]); return { motherAccountId: mother, status: 'ready' }; },
+    personal: async mother => ({ motherAccountId: mother, status: 'ready' }),
     discover: async mother => { calls.push(['discover', mother]); return discovered; },
     onStage: () => {}, isCurrent: () => true, ...overrides,
   };
@@ -29,6 +30,43 @@ test('saved revoked failure starts with full login and a second revocation never
   const f = fixture({ access: revoked });
   assert.deepEqual(await connectSelectedWorkspace(f.options), revoked);
   assert.deepEqual(f.calls, [['login', motherId], ['discover', motherId], ['exchange', workspaceId, motherId]]);
+});
+
+test('a lost mother login response observes the admitted attempt and reconnects the original space once', async () => {
+  let logins = 0; let reads = 0;
+  const f = fixture({ access: revoked,
+    login: async () => { logins++; throw new TypeError('response_lost'); },
+    personal: async mother => { reads++; return { motherAccountId: mother, status: reads === 1 ? 'verifying' : 'ready' }; },
+  });
+  assert.deepEqual(await connectSelectedWorkspace(f.options), revoked);
+  assert.equal(logins, 1);
+  assert.equal(reads, 2);
+  assert.deepEqual(f.calls, [['discover', motherId], ['exchange', workspaceId, motherId]]);
+});
+
+test('lost-response recovery preserves mother identity, selection and Owner permissions', async () => {
+  for (const status of [401, 403, 409]) {
+    let reads = 0;
+    const failure = Object.assign(new Error('owner_denied'), { status });
+    const f = fixture({ access: revoked, login: async () => { throw failure; }, personal: async () => { reads++; return { motherAccountId: motherId, status: 'ready' }; } });
+    await assert.rejects(connectSelectedWorkspace(f.options), error => error === failure);
+    assert.equal(reads, 0);
+    assert.deepEqual(f.calls, []);
+  }
+  const other = fixture({ access: revoked, login: async () => { throw new TypeError('response_lost'); }, personal: async () => ({ motherAccountId: 'other-mother', status: 'ready' }) });
+  await assert.rejects(connectSelectedWorkspace(other.options), /其他母号/);
+  assert.deepEqual(other.calls, []);
+  let current = true;
+  const changed = fixture({ access: revoked, isCurrent: () => current,
+    login: async () => { throw new TypeError('response_lost'); },
+    personal: async () => { current = false; return { motherAccountId: motherId, status: 'ready' }; },
+  });
+  await assert.rejects(connectSelectedWorkspace(changed.options), /选择已变化/);
+  assert.deepEqual(changed.calls, []);
+  const denied = Object.assign(new Error('owner_revoked'), { status: 401 });
+  const owner = fixture({ access: revoked, login: async () => { throw new TypeError('response_lost'); }, personal: async () => { throw denied; } });
+  await assert.rejects(connectSelectedWorkspace(owner.options), error => error === denied);
+  assert.deepEqual(owner.calls, []);
 });
 
 test('proxy, permission and unknown switch failures do not submit passwords', async () => {

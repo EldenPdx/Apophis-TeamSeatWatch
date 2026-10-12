@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"github.com/xft0202/Apophis-TeamSeatWatch/internal/browserenv"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -50,10 +51,10 @@ func (a OfficialRotationCredentialAdapter) CreateCandidateOAuth(ctx context.Cont
 	if factory == nil {
 		factory = NewPersonalBrowser
 	}
-	browser := func(ctx context.Context, c *http.Client, jar http.CookieJar) (http.RoundTripper, func(), error) {
+	browser := func(ctx context.Context, c *http.Client, jar http.CookieJar, environment browserenv.Environment) (http.RoundTripper, func(), error) {
 		source := *c
 		source.Transport = base.Transport
-		return factory(ctx, &source, jar)
+		return factory(ctx, &source, jar, environment)
 	}
 	config, err := NewHTTPConfig(officialChatBase)
 	if err != nil {

@@ -93,7 +93,7 @@ func (w *Worker) runWorkspaceAuthorization(ctx context.Context, item Task, lease
 			return platform.DeliveryCredentialSet{}, platform.ErrPersonalIdentityUnavailable
 		}
 		login.PlatformSubjectID = identity.SubjectID
-		return generator.CreateDeliveryCredentials(ctx, platform.DeliveryCredentialRequest{Identifier: login.TargetIdentifier, Password: login.Password, TOTPSecret: login.TOTPSecret, Recovery: login.RecoverySecret, Workspace: target.PlatformWorkspace, PersonalSession: &session})
+		return generator.CreateDeliveryCredentials(ctx, platform.DeliveryCredentialRequest{Environment: personal.Environment, Identifier: login.TargetIdentifier, Password: login.Password, TOTPSecret: login.TOTPSecret, Recovery: login.RecoverySecret, Workspace: target.PlatformWorkspace, PersonalSession: &session})
 	}
 	credentials, err := generate(personal.Session)
 	if errors.Is(err, platform.ErrBrowserSessionExpired) {

@@ -212,7 +212,7 @@ func TestOfficialRotationCandidateOAuthUsesSourcedIsolatedPKCE(t *testing.T) {
 			client.Jar.SetCookies(origin, []*http.Cookie{{Name: "ambient", Value: "secret"}})
 			a := OfficialRotationCredentialAdapter{Browser: fixturePersonalBrowser, Client: func(context.Context) (*http.Client, func(), error) { return client, nil, nil }}
 			a.WorkspaceBrowser = fixtureWorkspaceOAuthBrowser
-			got, err := a.CreateCandidateOAuth(context.Background(), DeliveryCredentialRequest{Identifier: "child@example.test", Password: "pw", TOTPSecret: "JBSWY3DPEHPK3PXP", Workspace: "workspace-1"}, "user-1")
+			got, err := a.CreateCandidateOAuth(context.Background(), DeliveryCredentialRequest{Environment: fixtureEnvironment, Identifier: "child@example.test", Password: "pw", TOTPSecret: "JBSWY3DPEHPK3PXP", Workspace: "workspace-1"}, "user-1")
 			if (err == nil) != (mode == "valid") || calls == 0 {
 				t.Fatalf("mode=%s err=%v", mode, err)
 			}

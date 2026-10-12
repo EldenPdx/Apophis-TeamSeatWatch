@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/xft0202/Apophis-TeamSeatWatch/internal/auth"
+	"github.com/xft0202/Apophis-TeamSeatWatch/internal/browserenv"
 )
 
 type PersonalWebRefresher struct {
@@ -19,12 +20,20 @@ type PersonalWebRefresher struct {
 	Browser PersonalBrowserFactory
 }
 
+// This local denial stays distinguishable through net/http's url.Error wrapper.
+type personalRequestDenial string
+
+func (e personalRequestDenial) Error() string { return string(e) }
+
 func personalRequestFailure(err error) PersonalRefreshResult {
 	failure := &PersonalRefreshFailure{Code: "login_request_failed"}
 	var rejected *authHTTPError
 	var network net.Error
 	var request *url.Error
+	var denied personalRequestDenial
 	switch {
+	case errors.As(err, &denied):
+	// Keep the existing login_request_failed outcome for an intentional local refusal.
 	case errors.As(err, &rejected):
 		failure.HTTPStatus = rejected.status
 		switch {
@@ -52,32 +61,35 @@ type personalHostGuard struct{ next http.RoundTripper }
 
 func validatePersonalRequest(req *http.Request) error {
 	if req == nil {
-		return errors.New("personal login request missing")
+		return personalRequestDenial("personal login request missing")
 	}
 	u := req.URL
 	if u == nil || u.Scheme != "https" || u.User != nil || u.Port() != "" ||
 		(u.Hostname() != "chatgpt.com" && u.Hostname() != "auth.openai.com") ||
 		(req.Host != "" && req.Host != u.Host) {
-		return errors.New("personal login URL is not first-party HTTPS")
+		return personalRequestDenial("personal login URL is not first-party HTTPS")
 	}
 	path := u.Path
 	if personalChoiceRequest(req) {
 		return nil
 	}
+	if authorization, _ := req.Context().Value(personalAuthorizationContextKey{}).(*personalAuthorization); authorization.allows(req.Method, u) {
+		return nil
+	}
 	if strings.Contains(path, "/workspace/select") || strings.Contains(path, "/session/select") ||
 		strings.Contains(path, "/consent") || strings.HasPrefix(path, "/oauth/") ||
 		strings.HasPrefix(path, "/backend-api/") || strings.Contains(path, "/invites/") {
-		return errors.New("personal login path is not permitted")
+		return personalRequestDenial("personal login path is not permitted")
 	}
 	if req.Method == http.MethodPost {
 		target := u.Hostname() + path
 		if target != "chatgpt.com/api/auth/signin/openai" &&
 			target != "auth.openai.com/api/accounts/password/verify" &&
 			target != "auth.openai.com/api/accounts/mfa/verify" {
-			return errors.New("personal login POST is not permitted")
+			return personalRequestDenial("personal login POST is not permitted")
 		}
 	} else if req.Method != http.MethodGet {
-		return errors.New("personal login method is not permitted")
+		return personalRequestDenial("personal login method is not permitted")
 	}
 	return nil
 }
@@ -89,11 +101,14 @@ func (g personalHostGuard) RoundTrip(req *http.Request) (*http.Response, error) 
 	return g.next.RoundTrip(req)
 }
 
-// RefreshPersonal authenticates a fresh Personal-only session. It never calls
-// Team selection, consent, PKCE, account invite, or any Workspace action.
+// RefreshPersonal authenticates a fresh Personal-only session. Its first-party
+// Web authorization never grants a Workspace or delivery OAuth capability.
 // A multi-account login may select its independently identified Personal account.
 func (p PersonalWebRefresher) RefreshPersonal(ctx context.Context, material MotherMaterial) (PersonalRefreshResult, error) {
 	failed := PersonalRefreshResult{Status: "refresh_failed"}
+	if err := material.Environment.Validate(); err != nil {
+		return failed, err
+	}
 	if p.Client == nil || strings.TrimSpace(material.LoginIdentifier) == "" || material.Password == "" || material.TOTPSecret == "" {
 		return failed, nil
 	}
@@ -107,6 +122,9 @@ func (p PersonalWebRefresher) RefreshPersonal(ctx context.Context, material Moth
 	if release != nil {
 		defer release()
 	}
+	// Admission waiting uses only caller cancellation; execution starts here.
+	ctx, stopExecution := context.WithTimeout(ctx, 120*time.Second)
+	defer stopExecution()
 	if source == nil || source.Transport == nil || source.Timeout <= 0 {
 		return failed, nil
 	}
@@ -118,7 +136,7 @@ func (p PersonalWebRefresher) RefreshPersonal(ctx context.Context, material Moth
 	if factory == nil {
 		factory = NewPersonalBrowser
 	}
-	transport, closeBrowser, err := factory(ctx, source, jar)
+	transport, closeBrowser, err := factory(ctx, source, jar, material.Environment)
 	if err != nil {
 		return personalRequestFailure(err), nil
 	}
@@ -131,10 +149,7 @@ func (p PersonalWebRefresher) RefreshPersonal(ctx context.Context, material Moth
 	client.Jar = jar
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	r := &HTTPReader{client: &client}
-	deviceID, err := newBrowserID()
-	if err != nil {
-		return failed, nil
-	}
+	deviceID := material.Environment.DeviceID
 	loggingID, err := newBrowserID()
 	if err != nil {
 		return failed, nil
@@ -143,9 +158,19 @@ func (p PersonalWebRefresher) RefreshPersonal(ctx context.Context, material Moth
 	if err != nil {
 		return personalRequestFailure(err), nil
 	}
+	authorization, err := personalAuthorizationFromLoginURL(loginURL)
+	if err != nil {
+		return personalRequestFailure(err), nil
+	}
+	if authorization != nil {
+		ctx = context.WithValue(ctx, personalAuthorizationContextKey{}, authorization)
+	}
 	pageURL, page, err := r.followBrowserRedirect(ctx, jar, loginURL, officialChatBase+"/login")
 	if err != nil {
 		return personalRequestFailure(err), nil
+	}
+	if authorization.completedAt(pageURL) {
+		return r.readPersonalSession(ctx, jar, deviceID, false, material.LoginIdentifier)
 	}
 	if !strings.Contains(strings.ToLower(pageURL+" "+string(page)), "log-in/password") {
 		pageURL, page, err = r.followBrowserRedirect(ctx, jar, officialAuthBase+"/log-in/password", pageURL)
@@ -210,12 +235,15 @@ func (p PersonalWebRefresher) RefreshPersonal(ctx context.Context, material Moth
 	if err = r.finishPersonalChoice(ctx, jar, pageURL); err != nil {
 		return personalRequestFailure(err), nil
 	}
-	return r.readPersonalSession(ctx, jar, deviceID, false)
+	return r.readPersonalSession(ctx, jar, deviceID, false, "")
 }
 
 // RenewPersonal checks the saved session on the same fixed first-party endpoint.
-func (p PersonalWebRefresher) RenewPersonal(ctx context.Context, saved PersonalSession) (PersonalRefreshResult, error) {
+func (p PersonalWebRefresher) RenewPersonal(ctx context.Context, saved PersonalSession, environment browserenv.Environment) (PersonalRefreshResult, error) {
 	failed := PersonalRefreshResult{Status: "refresh_failed"}
+	if err := environment.Validate(); err != nil {
+		return failed, err
+	}
 	if p.Client == nil || !validPersonalCookies(saved) {
 		return failed, nil
 	}
@@ -226,9 +254,12 @@ func (p PersonalWebRefresher) RenewPersonal(ctx context.Context, saved PersonalS
 	if release != nil {
 		defer release()
 	}
+	ctx, stopExecution := context.WithTimeout(ctx, 120*time.Second)
+	defer stopExecution()
 	if source == nil || source.Transport == nil || source.Timeout <= 0 {
 		return failed, nil
 	}
+	saved.DeviceID = environment.DeviceID
 	jar, err := personalCookieJar(saved)
 	if err != nil {
 		return failed, nil
@@ -237,7 +268,7 @@ func (p PersonalWebRefresher) RenewPersonal(ctx context.Context, saved PersonalS
 	if factory == nil {
 		factory = NewPersonalBrowser
 	}
-	transport, closeBrowser, err := factory(ctx, source, jar)
+	transport, closeBrowser, err := factory(ctx, source, jar, environment)
 	if err != nil {
 		return personalRequestFailure(err), nil
 	}
@@ -248,7 +279,7 @@ func (p PersonalWebRefresher) RenewPersonal(ctx context.Context, saved PersonalS
 	}
 	client.Transport = personalHostGuard{next: transport}
 	client.Jar = jar
-	return (&HTTPReader{client: &client}).readPersonalSession(ctx, jar, saved.DeviceID, true)
+	return (&HTTPReader{client: &client}).readPersonalSession(ctx, jar, environment.DeviceID, true, "")
 }
 
 func personalCookieJar(saved PersonalSession) (http.CookieJar, error) {
@@ -269,7 +300,7 @@ func personalCookieJar(saved PersonalSession) (http.CookieJar, error) {
 	return jar, nil
 }
 
-func (r *HTTPReader) readPersonalSession(ctx context.Context, jar http.CookieJar, deviceID string, renewal bool) (PersonalRefreshResult, error) {
+func (r *HTTPReader) readPersonalSession(ctx context.Context, jar http.CookieJar, deviceID string, renewal bool, expectedIdentifier string) (PersonalRefreshResult, error) {
 	failed := PersonalRefreshResult{Status: "refresh_failed"}
 	sessionBody, err := r.authJSONWithJar(ctx, jar, http.MethodGet, officialChatBase+"/api/auth/session", nil, officialChatBase+"/")
 	if err != nil {
@@ -282,6 +313,10 @@ func (r *HTTPReader) readPersonalSession(ctx context.Context, jar http.CookieJar
 	var snapshot struct {
 		AccessToken string `json:"accessToken"`
 		Expires     string `json:"expires"`
+		User        struct {
+			Email string `json:"email"`
+			ID    string `json:"id"`
+		} `json:"user"`
 	}
 	if json.Unmarshal(sessionBody, &snapshot) != nil {
 		return failed, nil
@@ -316,6 +351,12 @@ func (r *HTTPReader) readPersonalSession(ctx context.Context, jar http.CookieJar
 	result := PersonalRefreshResult{Status: "ready", Session: PersonalSession{AccessToken: snapshot.AccessToken, Cookies: stored, DeviceID: deviceID, ExpiresAt: tokenExpiry, SessionExpiresAt: sessionExpiry}}
 	if !ValidatePersonalRefresh(result, now) {
 		return failed, nil
+	}
+	if expectedIdentifier != "" {
+		identity, err := personalBearerIdentity(result.Session, snapshot.User.Email, snapshot.User.ID, now)
+		if err != nil || !strings.EqualFold(identity.Identifier, strings.TrimSpace(expectedIdentifier)) {
+			return failed, nil
+		}
 	}
 	return result, nil
 }

@@ -196,7 +196,7 @@ func (h *OwnerAuthHandler) joinAction(w http.ResponseWriter, r *http.Request, pr
 	}
 	worker := uuid.New()
 	var err error
-	ctx, cancel := context.WithTimeout(r.Context(), 75*time.Second)
+	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	switch action {
 	case "run":

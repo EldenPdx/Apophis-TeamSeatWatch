@@ -3,6 +3,7 @@ package platform
 import (
 	"context"
 	"errors"
+	"github.com/xft0202/Apophis-TeamSeatWatch/internal/browserenv"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -12,6 +13,14 @@ import (
 	"github.com/chromedp/cdproto"
 	"github.com/chromedp/cdproto/network"
 )
+
+var fixtureEnvironment = func() browserenv.Environment {
+	e, err := browserenv.New()
+	if err != nil {
+		panic(err)
+	}
+	return e
+}()
 
 func TestPersonalRefreshInitializesBothHostsOnItsReservedClient(t *testing.T) {
 	fixture := &personalFlowFixture{token: personalFixtureToken(time.Now(), nil)}
@@ -24,8 +33,8 @@ func TestPersonalRefreshInitializesBothHostsOnItsReservedClient(t *testing.T) {
 	releases := 0
 	adapter := PersonalWebRefresher{
 		Client: func(context.Context) (*http.Client, func(), error) { return client, func() { releases++ }, nil },
-		Browser: func(ctx context.Context, source *http.Client, jar http.CookieJar) (http.RoundTripper, func(), error) {
-			if source != client || ctx != t.Context() {
+		Browser: func(ctx context.Context, source *http.Client, jar http.CookieJar, _ browserenv.Environment) (http.RoundTripper, func(), error) {
+			if source != client || ctx.Err() != nil {
 				t.Fatal("browser initializer did not use the already leased client and context")
 			}
 			for _, host := range []string{"chatgpt.com", "auth.openai.com"} {
@@ -35,7 +44,7 @@ func TestPersonalRefreshInitializesBothHostsOnItsReservedClient(t *testing.T) {
 			return source.Transport, func() {}, nil
 		},
 	}
-	result, err := adapter.RefreshPersonal(t.Context(), MotherMaterial{LoginIdentifier: "account@example.test", Password: "password", TOTPSecret: "JBSWY3DPEHPK3PXP"})
+	result, err := adapter.RefreshPersonal(t.Context(), MotherMaterial{Environment: fixtureEnvironment, LoginIdentifier: "account@example.test", Password: "password", TOTPSecret: "JBSWY3DPEHPK3PXP"})
 	if err != nil || result.Status != "ready" || releases != 1 {
 		t.Fatalf("status=%s releases=%d error=%v", result.Status, releases, err)
 	}
@@ -51,7 +60,7 @@ func TestPersonalRefreshInitializesBothHostsOnItsReservedClient(t *testing.T) {
 }
 
 func TestPersonalRefreshInitializationFailureNeverSubmitsCredentials(t *testing.T) {
-	for _, initialize := range []PersonalBrowserFactory{func(context.Context, *http.Client, http.CookieJar) (http.RoundTripper, func(), error) {
+	for _, initialize := range []PersonalBrowserFactory{func(context.Context, *http.Client, http.CookieJar, browserenv.Environment) (http.RoundTripper, func(), error) {
 		return nil, nil, errors.New("browser initialization failed")
 	}} {
 		fixture := &personalFlowFixture{}
@@ -59,7 +68,7 @@ func TestPersonalRefreshInitializationFailureNeverSubmitsCredentials(t *testing.
 		adapter := PersonalWebRefresher{Client: func(context.Context) (*http.Client, func(), error) {
 			return &http.Client{Transport: fixture, Timeout: time.Second}, func() { released = true }, nil
 		}, Browser: initialize}
-		result, err := adapter.RefreshPersonal(t.Context(), MotherMaterial{LoginIdentifier: "account@example.test", Password: "password", TOTPSecret: "JBSWY3DPEHPK3PXP"})
+		result, err := adapter.RefreshPersonal(t.Context(), MotherMaterial{Environment: fixtureEnvironment, LoginIdentifier: "account@example.test", Password: "password", TOTPSecret: "JBSWY3DPEHPK3PXP"})
 		if err != nil || result.Status != "refresh_failed" || len(fixture.paths) != 0 || !released {
 			t.Fatalf("initialization failed open: status=%s requests=%d released=%t", result.Status, len(fixture.paths), released)
 		}
@@ -90,7 +99,7 @@ func TestBrowserInitializationPreservesHostCookieWhenParentHasSameName(t *testin
 	}
 }
 
-func fixturePersonalBrowser(_ context.Context, source *http.Client, _ http.CookieJar) (http.RoundTripper, func(), error) {
+func fixturePersonalBrowser(_ context.Context, source *http.Client, _ http.CookieJar, _ browserenv.Environment) (http.RoundTripper, func(), error) {
 	return source.Transport, func() {}, nil
 }
 
@@ -118,13 +127,13 @@ func TestPersonalRefreshUsesBrowserForEveryLoginStageAndClosesBeforeLease(t *tes
 				t.Error("lease released before browser closed")
 			}
 		}, nil
-	}, Browser: func(_ context.Context, c *http.Client, _ http.CookieJar) (http.RoundTripper, func(), error) {
+	}, Browser: func(_ context.Context, c *http.Client, _ http.CookieJar, _ browserenv.Environment) (http.RoundTripper, func(), error) {
 		if c != source {
 			t.Fatal("browser changed lease")
 		}
 		return fixture, func() { closed = true }, nil
 	}}
-	result, err := adapter.RefreshPersonal(t.Context(), MotherMaterial{LoginIdentifier: "account@example.test", Password: "password", TOTPSecret: "JBSWY3DPEHPK3PXP"})
+	result, err := adapter.RefreshPersonal(t.Context(), MotherMaterial{Environment: fixtureEnvironment, LoginIdentifier: "account@example.test", Password: "password", TOTPSecret: "JBSWY3DPEHPK3PXP"})
 	if err != nil || result.Status != "ready" || !closed || len(fixture.paths) < 8 {
 		t.Fatalf("browser login incomplete: status=%s closed=%t requests=%d err=%v", result.Status, closed, len(fixture.paths), err)
 	}

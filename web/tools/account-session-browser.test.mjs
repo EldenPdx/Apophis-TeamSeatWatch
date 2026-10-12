@@ -13,7 +13,7 @@ test('account actions show their result and reuse saved sessions', async t => {
   const scenario = (name, run) => !process.env.TSW_ACCOUNT_BROWSER_SCENARIO || name.includes(process.env.TSW_ACCOUNT_BROWSER_SCENARIO) ? t.test(name, run) : t.test(name, { skip: 'outside requested scenario' }, run);
   const browser = await chromium.launch({ executablePath: '/root/.cache/ms-playwright/chromium-1243/chrome-linux64/chrome', headless: true, args: ['--no-sandbox'] });
   await mkdir('.scratch/account-session-reuse', { recursive: true });
-  const fixture = async ({ access = { targetAccountId: id, status: 'not_verified' }, healthy = 1, mode = 'proxy_required', acquired, loginStatus = 200, probeOutcome = 'available' } = {}) => {
+  const fixture = async ({ access = { targetAccountId: id, status: 'not_verified' }, healthy = 1, mode = 'proxy_required', acquired, loginStatus = 200, pendingReads = 0, probeOutcome = 'available' } = {}) => {
     const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
     const page = await context.newPage(); page.setDefaultTimeout(8000);
     const requests = []; const errors = [];
@@ -30,9 +30,10 @@ test('account actions show their result and reuse saved sessions', async t => {
       if (path.endsWith('/target-accounts')) return json({ items: [{ id, identifier, status: 'active', version: 1, materialStatus: 'complete', hasPassword: true, hasTotp: true, createdAt: '2026-10-06T00:00:00Z', updatedAt: '2026-10-06T00:00:00Z', tokenStatus: { hasAccessToken: snapshot.status === 'ready', hasRefreshToken: false }, personalAccess: snapshot, latestProbeStatus: 'unknown', latestProbeErrorCode: 'personal_credential_absent', latestProbeOrigin: 'personal' }], total: 1, page: 1, pageSize: 20 });
       if (path.endsWith('/personal-session')) {
         if (request.method() === 'POST') {
-          if (loginStatus !== 200) return json({ code: 'internal_error' }, loginStatus);
+          if (loginStatus !== 200) { if (acquired) snapshot = acquired; return json({ code: 'internal_error' }, loginStatus); }
           snapshot = acquired ?? ready();
         }
+        if (request.method() === 'GET' && snapshot.status === 'verifying' && pendingReads > 0 && --pendingReads === 0) snapshot = ready();
         return json(snapshot);
       }
       if (path.endsWith('/personal-probes/preview')) return json({ count: 1, scope: 'selected', label: '选中账号', scopeToken: 'fixture-scope' });
@@ -79,6 +80,18 @@ test('account actions show their result and reuse saved sessions', async t => {
       await f.click('获取 AT'); await f.row.getByText('获取 AT 失败，请检查网络连接后重试', { exact: false }).waitFor();
       assert.equal(f.posts().filter(request => request.path.endsWith('/personal-session')).length, 1);
       assert.equal(await f.row.getByRole('link', { name: '代理管理', exact: true }).count(), 0);
+      await f.close();
+    });
+    await scenario('lost login response observes the same queued attempt and final result', async () => {
+      const f = await fixture({ mode: 'direct', healthy: 0, loginStatus: 504, pendingReads: 2, acquired: { targetAccountId: id, status: 'verifying', checkedAt: new Date().toISOString() } });
+      await f.click('获取 AT'); await f.expect('正在获取 AT，请稍候');
+      await f.row.getByRole('button', { name: '获取中', exact: true }).waitFor();
+      await f.expect('AT 已保存，登录态可复用');
+      await f.page.evaluate(() => document.fonts.ready);
+      assert.equal(await f.row.evaluate(row => getComputedStyle(row).fontFamily.includes('DM Sans')), true);
+      await f.page.screenshot({ path: '.scratch/account-session-reuse/response-recovery.png' });
+      assert.equal(f.posts().filter(request => request.path.endsWith('/personal-session')).length, 1);
+      assert.ok(f.requests.filter(request => request.method === 'GET' && request.path.endsWith('/personal-session')).length >= 3);
       await f.close();
     });
     await scenario('direct mode bulk AT failures never link to proxy management', async () => {

@@ -74,18 +74,39 @@ export function useAccountLogin(onResult: () => void, concurrency = 1, capacity 
     locks.current.add(account.id); setPendingIds(new Set(locks.current)); setNotice('');
     const report = (result: AccountFeedback) => setFeedback(current => new Map(current).set(account.id, { ...result, updatedAt: Date.now() }));
     report({ message: '正在检查登录态', tone: 'warning' });
+    const startedAt = Date.now();
+    const observe = async (access: Awaited<ReturnType<typeof getTargetPersonalAccess>>) => {
+      report(personalAccessFeedback(access));
+      while (access.status === 'verifying' && live.current) {
+        await new Promise(resolve => window.setTimeout(resolve, 2000));
+        if (!live.current) return;
+        access = await getTargetPersonalAccess(account.id);
+        report(personalAccessFeedback(access));
+      }
+      if (live.current) onResultRef.current();
+    };
     try {
       const saved = await getTargetPersonalAccess(account.id);
       if (hasUsablePersonalAccess(saved)) { report({ message: '已复用有效 AT，无需重新登录', tone: 'success' }); onResultRef.current(); return; }
-      if (saved.status === 'verifying') { report(personalAccessFeedback(saved)); return; }
+      if (saved.status === 'verifying') { await observe(saved); return; }
       if (!account.hasPassword || !account.hasTotp) { report({ message: '请补全账号密码和有效 2FA 后获取 AT', tone: 'warning' }); return; }
       const blocked = await accountNetworkPrerequisite();
       if (blocked) { report(blocked); return; }
       report({ message: '正在获取 AT，优先复用登录态', tone: 'warning' });
-      report(personalAccessFeedback(await refreshTargetPersonalAccess(account.id)));
-      onResultRef.current();
+      await observe(await refreshTargetPersonalAccess(account.id));
     } catch (error: unknown) {
       const status = ownerProblem(error).status;
+      if (status !== 401 && status !== 403 && status !== 409) {
+        // The service owns an admitted reservation even if its POST response is
+        // lost. Read that attempt; never replay the mutation while it verifies.
+        try {
+          const access = await getTargetPersonalAccess(account.id);
+          if (hasUsablePersonalAccess(access) || access.status === 'verifying' ||
+              access.checkedAt && Date.parse(access.checkedAt) >= startedAt - 1000) {
+            await observe(access); return;
+          }
+        } catch { /* Keep an uncertain response distinct from a confirmed result. */ }
+      }
       report({ message: status === 401 ? '管理端登录已过期' : status === 409 ? '账号资料已变化，请刷新后重试' : '获取 AT 失败，请检查网络连接后重试', tone: 'error' });
       onResultRef.current();
     } finally { locks.current.delete(account.id); setPendingIds(new Set(locks.current)); }

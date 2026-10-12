@@ -16,6 +16,8 @@ The first run downloads build dependencies. Wait for the build, then set an admi
 
 The tool prepares the database, encryption material, certificates and two entry points. Later runs reuse your data and admin account. Installation material lives in `~/.local/share/apophis-teamseatwatch`, separate from the source. If you have a manual installation, retain its backup first: this entry creates a separate installation and does not adopt old containers or import their data automatically.
 
+The build stages the fixed SHA256 official ShardX 152.0.7977.65 ZIP in `.browser-artifacts/`; the runtime image contains only the unmodified extracted engine. Before a direct `docker build`, run `python3 tools/prepare-browser.py` (use `--source /path/to/ShardX-Linux.zip` to reuse the exact archive). Account profiles are created lazily and retained in the control service’s `browser-profiles` volume at `/var/lib/teamseatwatch/browser-profiles`. Restart and container recreation reuse this volume. Idle profiles run no browser. Fresh global concurrency defaults to five; saved proxy runtime parameters remain authoritative.
+
 ## 2. Open your workspace
 
 Import the displayed `installation/tls/authority/ca.crt` into your browser or operating system's trusted root store. Import the `.crt` certificate only.

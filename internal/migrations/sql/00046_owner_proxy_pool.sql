@@ -39,7 +39,7 @@ CREATE TABLE tsw_proxy_pool_settings (
     id BOOLEAN PRIMARY KEY DEFAULT true CHECK (id = true),
     target_healthy INTEGER NOT NULL DEFAULT 5 CHECK (target_healthy BETWEEN 1 AND 1000),
     probe_concurrency INTEGER NOT NULL DEFAULT 5 CHECK (probe_concurrency BETWEEN 1 AND 100),
-    task_concurrency INTEGER NOT NULL DEFAULT 3 CHECK (task_concurrency BETWEEN 1 AND 100),
+    task_concurrency INTEGER NOT NULL DEFAULT 5 CHECK (task_concurrency BETWEEN 1 AND 100),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_by TEXT NOT NULL DEFAULT 'system'
 );

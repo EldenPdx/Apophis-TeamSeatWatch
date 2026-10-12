@@ -206,10 +206,12 @@ func TestManagerConcurrentAdmissionAndReleaseNotification(t *testing.T) {
 		group.Add(1)
 		go func() {
 			defer group.Done()
-			lease, err := manager.Acquire(ctx)
+			waiting, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+			defer cancel()
+			lease, err := manager.Acquire(waiting)
 			if err == nil {
 				results <- lease
-			} else if !errors.Is(err, ErrLeaseExhausted) {
+			} else if !errors.Is(err, context.DeadlineExceeded) {
 				t.Errorf("unexpected acquire: %v", err)
 			}
 		}()

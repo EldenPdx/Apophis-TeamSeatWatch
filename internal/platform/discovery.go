@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/xft0202/Apophis-TeamSeatWatch/internal/browserenv"
 )
 
 // PersonalSession is a confirmed Personal credential generation. It must never
@@ -47,6 +49,7 @@ type DiscoveryAdapter interface {
 }
 
 type MotherMaterial struct {
+	Environment     browserenv.Environment
 	LoginIdentifier string
 	Password        string
 	TOTPSecret      string

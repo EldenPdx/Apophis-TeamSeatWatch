@@ -3,6 +3,7 @@ package platform
 import (
 	"context"
 	"errors"
+	"github.com/xft0202/Apophis-TeamSeatWatch/internal/browserenv"
 	"io"
 	"net/http"
 	"net/url"
@@ -114,6 +115,7 @@ func (r OfficialWorkspaceMemberRemover) RemoveWorkspaceMember(ctx context.Contex
 	req.Header.Set("Origin", selectedWorkspaceOrigin)
 	req.Header.Set("Referer", selectedWorkspaceOrigin+"/admin/members")
 	req.Header.Set("User-Agent", browserAuthUA)
+	req.Header.Set("Accept-Language", browserenv.AcceptLanguage)
 	req.Header.Set("Oai-Device-Id", strings.TrimSpace(access.DeviceID))
 	req.Header.Set("Sec-Fetch-Site", "same-origin")
 	req.Header.Set("Sec-Fetch-Mode", "cors")

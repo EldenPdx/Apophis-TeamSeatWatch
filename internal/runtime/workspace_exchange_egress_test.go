@@ -20,7 +20,7 @@ func TestWorkspaceExchangeAcquisitionFailureBeforePlatformRequest(t *testing.T) 
 		wait       bool
 	}{
 		{"proxy pool empty", "proxy_capacity_exhausted", egress.ModeRequired, false, false},
-		{"direct capacity full", "connection_capacity_exhausted", egress.ModeDirect, true, false},
+		{"direct capacity wait without maintainer", "connection_acquisition_timeout", egress.ModeDirect, true, false},
 		{"direct capacity wait timeout", "connection_acquisition_timeout", egress.ModeDirect, true, true},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
@@ -51,8 +51,10 @@ func TestWorkspaceExchangeAcquisitionFailureBeforePlatformRequest(t *testing.T) 
 				defer lease.Release()
 			}
 			ctx := t.Context()
-			if scenario.wait {
-				manager.SetRefillSignal(func() {})
+			if scenario.occupied {
+				if scenario.wait {
+					manager.SetRefillSignal(func() {})
+				}
 				var cancel context.CancelFunc
 				ctx, cancel = context.WithTimeout(ctx, 100*time.Millisecond)
 				defer cancel()
