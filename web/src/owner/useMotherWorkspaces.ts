@@ -3,7 +3,7 @@ import { useDebouncedValue } from '@mantine/hooks';
 import { useEffect, useRef, useState } from 'react';
 import type { components } from '../generated/owner';
 import {
-  getMotherDiscovery, getMotherPersonalAccess, listMotherAccounts, ownerProblem,
+  deleteMotherAccount, getMotherDiscovery, getMotherPersonalAccess, listMotherAccounts, ownerProblem,
   refreshMotherPersonalAccess, runMotherDiscovery,
 } from './auth';
 import { motherLoginFailure } from './workspaceConnection';
@@ -32,6 +32,9 @@ export function useMotherWorkspaces(active: boolean) {
   const [notice, setNotice, dismissNotice] = useActionFeedback('');
   const [readFailed, setReadFailed] = useState(false);
   const [records, setRecords] = useState<Record<string, MotherWorkspaceRecord>>({});
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [deletionFailures, setDeletionFailures, dismissDeletionFailures] = useActionFeedback<Record<string, string>>({});
+  const deletionLock = useRef(false);
   const recordsRef = useRef(records);
   recordsRef.current = records;
   const sequences = useRef(new Map<string, number>());
@@ -41,7 +44,7 @@ export function useMotherWorkspaces(active: boolean) {
   useEffect(() => { live.current = true; return () => { live.current = false; }; }, []);
   useEffect(() => {
     if (!active) return;
-    setLoading(true); setReadFailed(false); setNotice('');
+    setLoading(true); setReadFailed(false);
     if (search !== debouncedSearch) return;
     const controller = new AbortController();
     void listMotherAccounts(debouncedSearch.trim(), page, pageSize, controller.signal).then((result) => {
@@ -142,13 +145,41 @@ export function useMotherWorkspaces(active: boolean) {
     } finally { locks.current.delete(account.id); }
   }
 
+  async function remove(account: MotherAccount): Promise<boolean> {
+    if (deletionLock.current) return false;
+    deletionLock.current = true;
+    locks.current.add(account.id); begin(account.id);
+    setRecords((current) => ({ ...current, [account.id]: { ...(current[account.id] ?? emptyRecord()), phase: null } }));
+    setDeletingId(account.id); setNotice('');
+    setDeletionFailures((current) => { const next = { ...current }; delete next[account.id]; return next; });
+    try {
+      await deleteMotherAccount(account.id);
+      if (!live.current) return true;
+      setItems((current) => current.filter((item) => item.id !== account.id));
+      setRecords((current) => { const next = { ...current }; delete next[account.id]; return next; });
+      setNotice(`已删除母号 ${account.loginIdentifier}`);
+      setRevision((current) => current + 1);
+      return true;
+    } catch (error: unknown) {
+      const problem = ownerProblem(error);
+      const message = problem.status === 401 ? '登录已失效，请重新登录。' : problem.status === 404 ? '母号已删除，请刷新列表。' : '删除未完成，请重试。';
+      if (live.current) setDeletionFailures((current) => ({ ...current, [account.id]: message }));
+      return false;
+    } finally {
+      locks.current.delete(account.id); deletionLock.current = false;
+      if (live.current) setDeletingId(null);
+    }
+  }
+
   return {
     items, total, page, pageSize, search, loading, readFailed, notice, dismissNotice, records, read,
+    remove, deletingId, deletionFailures, dismissDeletionFailures,
     connect: (account: MotherAccount) => discover(account, true),
     rediscover: (account: MotherAccount) => discover(account, false),
-    setSearch: (value: string) => { setSearch(value); setPage(1); },
-    setPage, setPageSize: (value: number) => { setPageSize(value); setPage(1); },
-    refresh: () => setRevision((value) => value + 1),
-    imported: () => { setSearch(''); setPage(1); setRevision((value) => value + 1); },
+    setSearch: (value: string) => { setNotice(''); setSearch(value); setPage(1); },
+    setPage: (value: number) => { setNotice(''); setPage(value); },
+    setPageSize: (value: number) => { setNotice(''); setPageSize(value); setPage(1); },
+    refresh: () => { setNotice(''); setRevision((value) => value + 1); },
+    imported: () => { setNotice(''); setSearch(''); setPage(1); setRevision((value) => value + 1); },
   };
 }

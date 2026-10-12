@@ -905,6 +905,24 @@ paths:
                 $ref: '#/components/schemas/MotherAccount'
         default:
           $ref: '#/components/responses/Problem'
+    delete:
+      operationId: deleteMotherAccount
+      security:
+        - ownerSession: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfHeader'
+        - $ref: '#/components/parameters/AccountId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MotherAccountDelete'
+      responses:
+        '204':
+          description: Mother removed from management; credentials and business history retained
+        default:
+          $ref: '#/components/responses/Problem'
   /api/owner/v1/delivery-destinations:
     get:
       operationId: listDeliveryDestinations
@@ -4063,6 +4081,14 @@ components:
           enum:
             - not_verified
             - verified
+    MotherAccountDelete:
+      type: object
+      additionalProperties: false
+      required: [confirmed]
+      properties:
+        confirmed:
+          type: boolean
+          enum: [true]
     MotherPersonalAccess:
       type: object
       additionalProperties: false

@@ -210,6 +210,14 @@ export async function getMotherAccount(accountId: string, signal?: AbortSignal):
  return response.data;
 }
 
+export async function deleteMotherAccount(accountId: string): Promise<void> {
+  const response = await ownerApi.DELETE('/api/owner/v1/mother-accounts/{accountId}', {
+    params: { path: { accountId }, header: await mutationHeaders() },
+    body: { confirmed: true },
+  });
+  throwIfFailed(response);
+}
+
 export async function listAllMotherAccounts(): Promise<components['schemas']['MotherAccount'][]> {
   const items: components['schemas']['MotherAccount'][] = [];
   for (let page = 1; ; page++) {

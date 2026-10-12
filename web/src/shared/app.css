@@ -305,8 +305,8 @@ input {
 .management-table .mantine-Table-tr[data-selected] > :first-child { box-shadow: inset 2px 0 #4c4eda; }
 .management-table .mantine-Button-root { font-size: 12px; padding-inline: 8px; color: var(--tsw-muted); }
 .management-table .mantine-Button-root:hover { background: rgb(76 78 218 / 8%); }
-.management-table .batch-delete-action:not([data-disabled]) { color: var(--button-color); }
-.management-table .batch-delete-action:not([data-disabled]):hover { background: var(--button-hover); }
+.management-table .record-delete-action:not([data-disabled]) { color: var(--button-color); }
+.management-table .record-delete-action:not([data-disabled]):hover { background: var(--button-hover); }
 .management-table .mantine-Badge-root { font-size: 11px; text-transform: none; letter-spacing: 0; }
 .management-table .record-center-cell { text-align: center; }
 .management-table[aria-busy='true'] tbody { opacity: .45; pointer-events: none; }

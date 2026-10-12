@@ -96,21 +96,32 @@ func (h *OwnerAuthHandler) listMotherAccounts(w http.ResponseWriter, r *http.Req
 	if params.Search != nil {
 		search = strings.TrimSpace(string(*params.Search))
 	}
-	rows, err := h.pool.Query(r.Context(), `SELECT account.id, account.display_name, account.platform_account_ref, account.status, account.version, account.updated_at,
-		credential.login_identifier, CASE WHEN credential.totp_secret IS NULL THEN 'needs_totp' ELSE 'complete' END,
-		count(*) OVER() FROM tsw_mother_accounts account
+	tx, err := h.pool.BeginTx(r.Context(), pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		h.workspaceFailure(w, r, err)
+		return
+	}
+	defer tx.Rollback(r.Context())
+	response := ownerapi.MotherAccountList{Items: []ownerapi.MotherAccount{}, Page: page, PageSize: size}
+	where := ` FROM tsw_mother_accounts account JOIN tsw_mother_account_credentials credential ON credential.mother_account_id=account.id
+		WHERE account.deleted_at IS NULL AND ($1='' OR credential.login_identifier ILIKE '%' || $1 || '%' OR account.display_name ILIKE '%' || $1 || '%')`
+	if err := tx.QueryRow(r.Context(), `SELECT count(*)`+where, search).Scan(&response.Total); err != nil {
+		h.workspaceFailure(w, r, err)
+		return
+	}
+	rows, err := tx.Query(r.Context(), `SELECT account.id, account.display_name, account.platform_account_ref, account.status, account.version, account.updated_at,
+		credential.login_identifier, CASE WHEN credential.totp_secret IS NULL THEN 'needs_totp' ELSE 'complete' END FROM tsw_mother_accounts account
 		JOIN tsw_mother_account_credentials credential ON credential.mother_account_id = account.id
-		WHERE ($3 = '' OR credential.login_identifier ILIKE '%' || $3 || '%' OR account.display_name ILIKE '%' || $3 || '%')
+		WHERE account.deleted_at IS NULL AND ($3 = '' OR credential.login_identifier ILIKE '%' || $3 || '%' OR account.display_name ILIKE '%' || $3 || '%')
 		ORDER BY `+order+` LIMIT $1 OFFSET $2`, size, (page-1)*size, search)
 	if err != nil {
 		h.workspaceFailure(w, r, err)
 		return
 	}
 	defer rows.Close()
-	response := ownerapi.MotherAccountList{Items: []ownerapi.MotherAccount{}, Page: page, PageSize: size}
 	for rows.Next() {
 		var item motherAccountDTO
-		if err := rows.Scan(&item.Id, &item.DisplayName, &item.PlatformAccountRef, &item.Status, &item.Version, &item.UpdatedAt, &item.LoginIdentifier, &item.MaterialStatus, &response.Total); err != nil {
+		if err := rows.Scan(&item.Id, &item.DisplayName, &item.PlatformAccountRef, &item.Status, &item.Version, &item.UpdatedAt, &item.LoginIdentifier, &item.MaterialStatus); err != nil {
 			h.workspaceFailure(w, r, err)
 			return
 		}
@@ -221,7 +232,7 @@ func (h *OwnerAuthHandler) updateMotherAccount(w http.ResponseWriter, r *http.Re
 	}
 	defer tx.Rollback(r.Context())
 	var item motherAccountDTO
-	err = tx.QueryRow(r.Context(), `UPDATE tsw_mother_accounts SET display_name=$3,status=$4,updated_at=now(),version=version+1 WHERE id=$1 AND version=$2 RETURNING id,display_name,platform_account_ref,status,version,updated_at`, r.PathValue("accountId"), version, displayName, string(request.Status)).Scan(&item.Id, &item.DisplayName, &item.PlatformAccountRef, &item.Status, &item.Version, &item.UpdatedAt)
+	err = tx.QueryRow(r.Context(), `UPDATE tsw_mother_accounts SET display_name=$3,status=$4,updated_at=now(),version=version+1 WHERE id=$1 AND version=$2 AND deleted_at IS NULL RETURNING id,display_name,platform_account_ref,status,version,updated_at`, r.PathValue("accountId"), version, displayName, string(request.Status)).Scan(&item.Id, &item.DisplayName, &item.PlatformAccountRef, &item.Status, &item.Version, &item.UpdatedAt)
 	credentialChanged := request.Password != nil || request.TotpSecret != nil
 	if err == nil && credentialChanged {
 		var previousPassword, previousTOTP []byte
@@ -263,19 +274,7 @@ func (h *OwnerAuthHandler) updateMotherAccount(w http.ResponseWriter, r *http.Re
 	// The revision fence prevents reads, but old sealed AT/cookies must not
 	// survive a material rotation (or disabling the account) indefinitely.
 	if err == nil && (credentialChanged || string(request.Status) == "disabled") {
-		_, err = tx.Exec(r.Context(), `DELETE FROM tsw_selected_workspace_tokens WHERE mother_account_id=$1`, item.Id)
-		if err == nil {
-			_, err = tx.Exec(r.Context(), `DELETE FROM tsw_mother_personal_sessions WHERE mother_account_id=$1`, item.Id)
-		}
-		if err == nil {
-			_, err = tx.Exec(r.Context(), `DELETE FROM tsw_mother_workspace_visibility WHERE mother_account_id=$1`, item.Id)
-		}
-		if err == nil {
-			_, err = tx.Exec(r.Context(), `DELETE FROM tsw_mother_discoveries WHERE mother_account_id=$1`, item.Id)
-		}
-		if err == nil {
-			_, err = tx.Exec(r.Context(), `DELETE FROM tsw_mother_personal_access WHERE mother_account_id=$1`, item.Id)
-		}
+		err = clearMotherAccess(r.Context(), tx, item.Id)
 	}
 	if err == nil {
 		item.AccessStatus = ownerapi.MotherAccountAccessStatusNotVerified

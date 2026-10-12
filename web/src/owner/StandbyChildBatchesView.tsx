@@ -69,7 +69,7 @@ export default function StandbyChildBatchesView({ active = true }: { active?: bo
               <Button variant="subtle" size="xs" disabled={disabled || model.loading} onClick={() => model.open('members', item)}>管理成员</Button>
               <Button variant="subtle" size="xs" disabled={disabled || model.loading} onClick={() => { setRenaming(item); setNextName(item.name); }}>重命名</Button>
               <Button variant="subtle" size="xs" loading={model.pending === `export:${item.id}`} disabled={disabled || model.loading || !item.memberCount} onClick={() => void model.download(item)}>导出</Button>
-              <Button variant="outline" color="error" className="batch-delete-action" size="xs" loading={model.pending === `delete:${item.id}`} disabled={disabled || model.loading || !model.stable} onClick={() => model.requestDeletion(item)}>删除</Button>
+              <Button variant="outline" color="error" className="record-delete-action" size="xs" loading={model.pending === `delete:${item.id}`} disabled={disabled || model.loading || !model.stable} onClick={() => model.requestDeletion(item)}>删除</Button>
             </Group>{model.feedback[item.id] ? <Text size="xs" c="dimmed" role="status">{model.feedback[item.id]}</Text> : null}</Stack></Table.Td>
           </Table.Tr>)}</Table.Tbody>
         </Table> : <Table aria-busy={model.loading} highlightOnHover stickyHeader miw={940} className="account-table batch-account-table">

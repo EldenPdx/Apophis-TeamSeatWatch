@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -98,7 +99,12 @@ func (h *OwnerAuthHandler) importMotherAccounts(w http.ResponseWriter, r *http.R
 	}
 	defer tx.Rollback(r.Context())
 	seen := make(map[string]struct{})
-	importedIDs := make([]string, 0)
+	type importedAccount struct {
+		id       uuid.UUID
+		restored bool
+		version  int64
+	}
+	importedAccounts := make([]importedAccount, 0)
 	changed := false
 	for index := range result.Rows {
 		row := &result.Rows[index]
@@ -123,43 +129,63 @@ func (h *OwnerAuthHandler) importMotherAccounts(w http.ResponseWriter, r *http.R
 			continue
 		}
 		seen[key] = struct{}{}
-		var existing string
-		err = tx.QueryRow(r.Context(), `SELECT mother_account_id FROM tsw_mother_account_credentials WHERE identifier_key_version=$1 AND identifier_hmac=$2`, keyVersion, fingerprint[:]).Scan(&existing)
-		if err == nil {
+		var accountID uuid.UUID
+		var restored bool
+		var revision, accountVersion int64
+		err = tx.QueryRow(r.Context(), `SELECT account.id,account.deleted_at IS NOT NULL,credential.secret_revision,account.version FROM tsw_mother_account_credentials credential JOIN tsw_mother_accounts account ON account.id=credential.mother_account_id WHERE credential.identifier_key_version=$1 AND credential.identifier_hmac=$2 FOR UPDATE OF account,credential`, keyVersion, fingerprint[:]).Scan(&accountID, &restored, &revision, &accountVersion)
+		if err == nil && !restored {
 			row.Status = ownerapi.MotherAccountImportRowStatusDuplicate
 			row.Message = materialString("资料已存在")
 			result.Duplicate++
 			continue
 		}
-		if !errors.Is(err, pgx.ErrNoRows) {
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			h.workspaceFailure(w, r, err)
 			return
 		}
-		var accountID uuid.UUID
-		err = tx.QueryRow(r.Context(), `INSERT INTO tsw_mother_accounts (display_name) VALUES ($1) RETURNING id`, identifier).Scan(&accountID)
+		if restored {
+			revision++
+			err = tx.QueryRow(r.Context(), `UPDATE tsw_mother_accounts SET status='active',deleted_at=NULL,deleted_by=NULL,version=version+1,updated_at=now() WHERE id=$1 RETURNING version`, accountID).Scan(&accountVersion)
+		} else {
+			revision = 1
+			err = tx.QueryRow(r.Context(), `INSERT INTO tsw_mother_accounts (display_name) VALUES ($1) RETURNING id,version`, identifier).Scan(&accountID, &accountVersion)
+		}
 		if err == nil {
 			var sealedPassword, sealedTOTP []byte
-			sealedPassword, err = mothersecret.Seal(h.keyRing, accountID, 1, mothersecret.Password, []byte(material.password))
+			sealedPassword, err = mothersecret.Seal(h.keyRing, accountID, revision, mothersecret.Password, []byte(material.password))
 			if err == nil && material.totp != "" {
-				sealedTOTP, err = mothersecret.Seal(h.keyRing, accountID, 1, mothersecret.TOTP, []byte(material.totp))
+				sealedTOTP, err = mothersecret.Seal(h.keyRing, accountID, revision, mothersecret.TOTP, []byte(material.totp))
 			}
 			if err == nil {
-				_, err = tx.Exec(r.Context(), `INSERT INTO tsw_mother_account_credentials (mother_account_id,login_identifier,identifier_hmac,identifier_key_version,password_secret,totp_secret) VALUES ($1,$2,$3,$4,$5,$6)`, accountID, identifier, fingerprint[:], keyVersion, sealedPassword, sealedTOTP)
+				if restored {
+					_, err = tx.Exec(r.Context(), `UPDATE tsw_mother_account_credentials SET password_secret=$2,totp_secret=$3,secret_revision=$4,version=version+1,updated_at=now() WHERE mother_account_id=$1`, accountID, sealedPassword, sealedTOTP, revision)
+				} else {
+					_, err = tx.Exec(r.Context(), `INSERT INTO tsw_mother_account_credentials (mother_account_id,login_identifier,identifier_hmac,identifier_key_version,password_secret,totp_secret) VALUES ($1,$2,$3,$4,$5,$6)`, accountID, identifier, fingerprint[:], keyVersion, sealedPassword, sealedTOTP)
+				}
 			}
+		}
+		if err == nil && restored {
+			err = clearMotherAccess(r.Context(), tx, accountID)
 		}
 		if err != nil {
 			h.workspaceFailure(w, r, err)
 			return
 		}
 		changed = true
-		importedIDs = append(importedIDs, accountID.String())
+		importedAccounts = append(importedAccounts, importedAccount{id: accountID, restored: restored, version: accountVersion})
 		result.Imported++
 	}
 	var token string
 	var idle time.Time
 	if changed {
-		for _, accountID := range importedIDs {
-			if _, err = audit.Write(r.Context(), tx, audit.Event{Type: audit.MotherAccountCreated, Actor: audit.ActorOwner, OwnerID: owner.OwnerID, EntityType: "mother_account", EntityID: accountID, Outcome: audit.OutcomeSucceeded, CorrelationID: correlation(r), Details: audit.WorkspaceDetails{Result: "created"}, IdempotencyKey: accountID + ":mother-import"}); err != nil {
+		for _, account := range importedAccounts {
+			event := audit.Event{Type: audit.MotherAccountCreated, Actor: audit.ActorOwner, OwnerID: owner.OwnerID, EntityType: "mother_account", EntityID: account.id.String(), Outcome: audit.OutcomeSucceeded, CorrelationID: correlation(r), Details: audit.WorkspaceDetails{Result: "created"}, IdempotencyKey: account.id.String() + ":mother-import"}
+			if account.restored {
+				event.Type = audit.MotherAccountUpdated
+				event.Details = audit.WorkspaceDetails{Result: "updated"}
+				event.IdempotencyKey = fmt.Sprintf("%s:mother-restored:%d", account.id, account.version)
+			}
+			if _, err = audit.Write(r.Context(), tx, event); err != nil {
 				h.workspaceFailure(w, r, err)
 				return
 			}
@@ -180,6 +206,22 @@ func (h *OwnerAuthHandler) importMotherAccounts(w http.ResponseWriter, r *http.R
 	writeJSON(w, http.StatusOK, result)
 }
 
+// Credential replacement invalidates saved platform access, never business history.
+func clearMotherAccess(ctx context.Context, tx pgx.Tx, accountID uuid.UUID) error {
+	for _, query := range []string{
+		`DELETE FROM tsw_selected_workspace_tokens WHERE mother_account_id=$1`,
+		`DELETE FROM tsw_mother_personal_sessions WHERE mother_account_id=$1`,
+		`DELETE FROM tsw_mother_workspace_visibility WHERE mother_account_id=$1`,
+		`DELETE FROM tsw_mother_discoveries WHERE mother_account_id=$1`,
+		`DELETE FROM tsw_mother_personal_access WHERE mother_account_id=$1`,
+	} {
+		if _, err := tx.Exec(ctx, query, accountID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (h *OwnerAuthHandler) exportMotherAccounts(w http.ResponseWriter, r *http.Request, _ ownerapi.ExportMotherAccountsParams) {
 	owner, ok := h.authenticated(w, r, true)
 	if !ok {
@@ -196,10 +238,10 @@ func (h *OwnerAuthHandler) exportMotherAccounts(w http.ResponseWriter, r *http.R
 	}
 
 	query := `SELECT account.id,credential.secret_revision,credential.login_identifier,credential.password_secret,credential.totp_secret
-		FROM tsw_mother_account_credentials credential JOIN tsw_mother_accounts account ON account.id=credential.mother_account_id`
+		FROM tsw_mother_account_credentials credential JOIN tsw_mother_accounts account ON account.id=credential.mother_account_id WHERE account.deleted_at IS NULL`
 	var args []any
 	if request.AccountIds != nil {
-		query += ` WHERE account.id = ANY($1)`
+		query += ` AND account.id = ANY($1)`
 		args = append(args, *request.AccountIds)
 	}
 	query += ` ORDER BY credential.login_identifier ASC`

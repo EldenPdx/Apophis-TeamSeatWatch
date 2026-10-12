@@ -31,6 +31,7 @@ const (
 	SessionRevoked                 EventType = "owner.session_revoked"
 	MotherAccountCreated           EventType = "mother_account.created"
 	MotherAccountUpdated           EventType = "mother_account.updated"
+	MotherAccountDeleted           EventType = "mother_account.deleted"
 	WorkspaceCreated               EventType = "workspace.created"
 	WorkspaceUpdated               EventType = "workspace.updated"
 	BindingCreated                 EventType = "workspace.binding_created"
@@ -346,6 +347,7 @@ var registry = map[EventType]spec{
 	SessionRevoked:                 {ActorOwner, "owner_session", []Outcome{OutcomeSucceeded}, "session", ownerSecurityScope},
 	MotherAccountCreated:           {ActorOwner, "mother_account", []Outcome{OutcomeSucceeded}, "workspace", ownerSecurityScope},
 	MotherAccountUpdated:           {ActorOwner, "mother_account", []Outcome{OutcomeSucceeded}, "workspace", ownerSecurityScope},
+	MotherAccountDeleted:           {ActorOwner, "mother_account", []Outcome{OutcomeSucceeded}, "mother_deletion", ownerSecurityScope},
 	WorkspaceCreated:               {ActorOwner, "workspace", []Outcome{OutcomeSucceeded}, "workspace", "workspace"},
 	WorkspaceUpdated:               {ActorOwner, "workspace", []Outcome{OutcomeSucceeded}, "workspace", "workspace"},
 	BindingCreated:                 {ActorOwner, "workspace_binding", []Outcome{OutcomeSucceeded}, "workspace", "workspace"},
@@ -508,6 +510,9 @@ func validate(event Event) ([]byte, spec, error) {
 	case "workspace":
 		value, ok := event.Details.(WorkspaceDetails)
 		validDetails = ok && (value.Result == "created" || value.Result == "updated" || value.Result == "bound")
+	case "mother_deletion":
+		value, ok := event.Details.(WorkspaceDetails)
+		validDetails = ok && value.Result == "deleted"
 	case "target":
 		value, ok := event.Details.(WorkspaceDetails)
 		validDetails = ok && (value.Result == "created" || value.Result == "updated" || value.Result == "credentials_updated")
@@ -651,7 +656,7 @@ func validSessionReason(eventType EventType, value string) bool {
 
 func validOwnerMutationOperation(value string) bool {
 	switch value {
-	case "child_material.import", "child_material.export", "mother_account.create", "mother_account.update", "workspace.create", "workspace.update", "binding.create", "workspace_read.create", "manual_verification.create", "target_account.create", "target_account.import", "target_account.update", "target_probe.create", "batch.create", "batch.update", "join.create", "join.reconcile", "remove.create", "remove.reconcile", "card.activate", "delivery.reclaim_authorize", "delivery.card_revoke", "delivery_destination.create", "delivery_destination.update", "delivery_destination.test", "delivery_destination.select":
+	case "child_material.import", "child_material.export", "mother_account.create", "mother_account.update", "mother_account.import", "mother_account.export", "workspace.create", "workspace.update", "binding.create", "workspace_read.create", "manual_verification.create", "target_account.create", "target_account.import", "target_account.update", "target_probe.create", "batch.create", "batch.update", "join.create", "join.reconcile", "remove.create", "remove.reconcile", "card.activate", "delivery.reclaim_authorize", "delivery.card_revoke", "delivery_destination.create", "delivery_destination.update", "delivery_destination.test", "delivery_destination.select":
 		return true
 	default:
 		return false
@@ -660,7 +665,7 @@ func validOwnerMutationOperation(value string) bool {
 
 func validOwnerMutationReason(value string) bool {
 	switch value {
-	case "invalid_request", "version_mismatch", "conflict", "idempotency_conflict", "workspace_not_found", "target_not_found", "batch_not_found", "join_not_ready", "join_target_not_in_batch", "join_confirmation_required", "remove_not_ready", "remove_confirmation_required", "delivery_not_reclaimable":
+	case "invalid_request", "version_mismatch", "conflict", "range_changed", "confirmation_required", "idempotency_conflict", "workspace_not_found", "target_not_found", "batch_not_found", "join_not_ready", "join_target_not_in_batch", "join_confirmation_required", "remove_not_ready", "remove_confirmation_required", "delivery_not_reclaimable":
 		return true
 	default:
 		return false

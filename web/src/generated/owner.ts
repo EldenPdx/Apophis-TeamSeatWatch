@@ -560,7 +560,7 @@ export interface paths {
         get: operations["getMotherAccount"];
         put?: never;
         post?: never;
-        delete?: never;
+        delete: operations["deleteMotherAccount"];
         options?: never;
         head?: never;
         patch: operations["updateMotherAccount"];
@@ -2156,6 +2156,10 @@ export interface components {
             materialStatus: "complete" | "needs_totp";
             /** @enum {string} */
             accessStatus: "not_verified" | "verified";
+        };
+        MotherAccountDelete: {
+            /** @enum {boolean} */
+            confirmed: true;
         };
         MotherPersonalAccess: {
             /** Format: uuid */
@@ -4805,6 +4809,33 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["MotherAccount"];
                 };
+            };
+            default: components["responses"]["Problem"];
+        };
+    };
+    deleteMotherAccount: {
+        parameters: {
+            query?: never;
+            header: {
+                "X-CSRF-Token": components["parameters"]["CsrfHeader"];
+            };
+            path: {
+                accountId: components["parameters"]["AccountId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MotherAccountDelete"];
+            };
+        };
+        responses: {
+            /** @description Mother removed from management; credentials and business history retained */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             default: components["responses"]["Problem"];
         };

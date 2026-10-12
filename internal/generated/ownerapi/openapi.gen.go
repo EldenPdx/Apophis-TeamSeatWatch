@@ -1182,6 +1182,21 @@ func (e MotherAccountStatus) Valid() bool {
 	}
 }
 
+// Defines values for MotherAccountDeleteConfirmed.
+const (
+	MotherAccountDeleteConfirmedTrue MotherAccountDeleteConfirmed = true
+)
+
+// Valid indicates whether the value is a known member of the MotherAccountDeleteConfirmed enum.
+func (e MotherAccountDeleteConfirmed) Valid() bool {
+	switch e {
+	case MotherAccountDeleteConfirmedTrue:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for MotherAccountImportRowStatus.
 const (
 	MotherAccountImportRowStatusDuplicate MotherAccountImportRowStatus = "duplicate"
@@ -4080,6 +4095,14 @@ type MotherAccountMaterialStatus string
 // MotherAccountStatus defines model for MotherAccount.Status.
 type MotherAccountStatus string
 
+// MotherAccountDelete defines model for MotherAccountDelete.
+type MotherAccountDelete struct {
+	Confirmed MotherAccountDeleteConfirmed `json:"confirmed"`
+}
+
+// MotherAccountDeleteConfirmed defines model for MotherAccountDelete.Confirmed.
+type MotherAccountDeleteConfirmed bool
+
 // MotherAccountImportResult defines model for MotherAccountImportResult.
 type MotherAccountImportResult struct {
 	Duplicate int                      `json:"duplicate"`
@@ -5816,6 +5839,11 @@ type ImportMotherAccountsParams struct {
 	XCSRFToken CsrfHeader `json:"X-CSRF-Token"`
 }
 
+// DeleteMotherAccountParams defines parameters for DeleteMotherAccount.
+type DeleteMotherAccountParams struct {
+	XCSRFToken CsrfHeader `json:"X-CSRF-Token"`
+}
+
 // UpdateMotherAccountParams defines parameters for UpdateMotherAccount.
 type UpdateMotherAccountParams struct {
 	XCSRFToken CsrfHeader `json:"X-CSRF-Token"`
@@ -6294,6 +6322,9 @@ type ExportMotherAccountsJSONRequestBody = ExportMotherAccounts
 // ImportMotherAccountsJSONRequestBody defines body for ImportMotherAccounts for application/json ContentType.
 type ImportMotherAccountsJSONRequestBody = ImportMotherAccounts
 
+// DeleteMotherAccountJSONRequestBody defines body for DeleteMotherAccount for application/json ContentType.
+type DeleteMotherAccountJSONRequestBody = MotherAccountDelete
+
 // UpdateMotherAccountJSONRequestBody defines body for UpdateMotherAccount for application/json ContentType.
 type UpdateMotherAccountJSONRequestBody = UpdateMotherAccount
 
@@ -6590,6 +6621,9 @@ type ServerInterface interface {
 
 	// (POST /api/owner/v1/mother-accounts/import)
 	ImportMotherAccounts(w http.ResponseWriter, r *http.Request, params ImportMotherAccountsParams)
+
+	// (DELETE /api/owner/v1/mother-accounts/{accountId})
+	DeleteMotherAccount(w http.ResponseWriter, r *http.Request, accountId AccountId, params DeleteMotherAccountParams)
 
 	// (GET /api/owner/v1/mother-accounts/{accountId})
 	GetMotherAccount(w http.ResponseWriter, r *http.Request, accountId AccountId)
@@ -10621,6 +10655,60 @@ func (siw *ServerInterfaceWrapper) ImportMotherAccounts(w http.ResponseWriter, r
 	handler.ServeHTTP(w, r)
 }
 
+// DeleteMotherAccount operation middleware
+func (siw *ServerInterfaceWrapper) DeleteMotherAccount(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "accountId" -------------
+	var accountId AccountId
+
+	err = runtime.BindStyledParameterWithOptions("simple", "accountId", r.PathValue("accountId"), &accountId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "accountId", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params DeleteMotherAccountParams
+
+	headers := r.Header
+
+	// ------------- Required header parameter "X-CSRF-Token" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-CSRF-Token")]; found {
+		var XCSRFToken CsrfHeader
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-CSRF-Token", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-CSRF-Token", valueList[0], &XCSRFToken, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: true, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-CSRF-Token", Err: err})
+			return
+		}
+
+		params.XCSRFToken = XCSRFToken
+
+	} else {
+		err := fmt.Errorf("Header parameter X-CSRF-Token is required, but not found")
+		siw.ErrorHandlerFunc(w, r, &RequiredHeaderError{ParamName: "X-CSRF-Token", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.DeleteMotherAccount(w, r, accountId, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // GetMotherAccount operation middleware
 func (siw *ServerInterfaceWrapper) GetMotherAccount(w http.ResponseWriter, r *http.Request) {
 
@@ -14273,6 +14361,7 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/owner/v1/mother-accounts", wrapper.CreateMotherAccount)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/owner/v1/mother-accounts/import", wrapper.ImportMotherAccounts)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/owner/v1/mother-accounts/export", wrapper.ExportMotherAccounts)
+	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/api/owner/v1/mother-accounts/{accountId}", wrapper.DeleteMotherAccount)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/owner/v1/mother-accounts/{accountId}", wrapper.GetMotherAccount)
 	m.HandleFunc(http.MethodPatch+" "+options.BaseURL+"/api/owner/v1/mother-accounts/{accountId}", wrapper.UpdateMotherAccount)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/owner/v1/delivery-destinations", wrapper.ListDeliveryDestinations)
