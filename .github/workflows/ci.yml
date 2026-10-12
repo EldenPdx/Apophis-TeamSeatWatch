@@ -49,7 +49,7 @@ jobs:
           pnpm --dir web typecheck
           pnpm --dir web build
           pnpm --dir web test
-          node --test $(rg --files web/tools -g '*.test.mjs' -g '!*-browser.test.mjs')
+          node --test $(find web/tools -maxdepth 1 -name '*.test.mjs' ! -name '*-browser.test.mjs')
       - name: Manual rotation browser regression
         run: |
           npm install --prefix "$RUNNER_TEMP/rotation-browser" --no-package-lock --no-audit --no-fund playwright@1.62.1
