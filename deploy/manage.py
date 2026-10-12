@@ -228,6 +228,7 @@ def main():
                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
             if args.build or not exists:
                 print('正在构建，首次运行需下载依赖 / Building; the first run downloads dependencies.', flush=True)
+                run([sys.executable, str(ROOT / 'tools/prepare-browser.py')])
                 run(['docker', 'build', '--network=host', '--tag', args.image, str(ROOT)])
             installation.compose('up', '-d', '--wait', 'postgres')
             installation.compose('stop', 'https', 'gateway', 'control')

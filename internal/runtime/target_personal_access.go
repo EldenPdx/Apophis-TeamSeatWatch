@@ -35,8 +35,9 @@ func (h *OwnerAuthHandler) RefreshTargetPersonalAccess(w http.ResponseWriter, r 
 	if !ok {
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
-	defer cancel()
+	ctx, stopTask := h.personalRefreshContext(r.Context())
+	defer stopTask()
+	r = r.WithContext(ctx)
 	result, err := (accountsession.Store{Pool: h.pool, KeyRing: h.keyRing}).Ensure(ctx, id, h.personalRefresh, false, func(tx pgx.Tx) error {
 		return h.lockCurrentOwnerSession(ctx, tx, owner)
 	})

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/xft0202/Apophis-TeamSeatWatch/internal/browserenv"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -82,6 +83,7 @@ func (r OfficialPersonalMembershipReader) ReadMembers(ctx context.Context, sessi
 	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(session.AccessToken))
 	req.Header.Set("oai-device-id", strings.TrimSpace(session.DeviceID))
 	req.Header.Set("User-Agent", browserAuthUA)
+	req.Header.Set("Accept-Language", browserenv.AcceptLanguage)
 	response, err := client.Do(req)
 	if err != nil || response == nil {
 		return fail(errors.New("personal membership reader unavailable"))

@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"github.com/xft0202/Apophis-TeamSeatWatch/internal/browserenv"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -97,6 +98,7 @@ func (e OfficialWorkspaceTokenExchanger) exchangeWorkspace(ctx context.Context, 
 		return failed, ErrWorkspaceExchangeUnavailable
 	}
 	req.Header.Set("User-Agent", browserAuthUA)
+	req.Header.Set("Accept-Language", browserenv.AcceptLanguage)
 	req.Header.Set("Accept", "*/*")
 	req.Header.Set("Oai-Device-Id", personal.DeviceID)
 	req.Header.Set("Oai-Client-Version", "prod-75c89a339d12aa428439cc667726d9e2351c5334")

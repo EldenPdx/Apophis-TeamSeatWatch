@@ -6,7 +6,7 @@ import {
   deleteMotherAccount, getMotherDiscovery, getMotherPersonalAccess, listMotherAccounts, ownerProblem,
   refreshMotherPersonalAccess, runMotherDiscovery,
 } from './auth';
-import { motherLoginFailure } from './workspaceConnection';
+import { loginMotherAndObserve, motherLoginFailure } from './workspaceConnection';
 import { canDiscover } from './workspaceSelection';
 
 export type MotherAccount = components['schemas']['MotherAccount'];
@@ -127,7 +127,11 @@ export function useMotherWorkspaces(active: boolean) {
     publish(account.id, sequence, { ...emptyRecord(), phase: login ? 'login' : 'discovering' });
     let access: Access | null = null;
     try {
-      access = login ? await refreshMotherPersonalAccess(account.id) : await getMotherPersonalAccess(account.id);
+      access = login ? await loginMotherAndObserve({
+        motherId: account.id, login: refreshMotherPersonalAccess, personal: getMotherPersonalAccess,
+        isCurrent: () => live.current && sequences.current.get(account.id) === sequence,
+        onAccess: (current) => publish(account.id, sequence, { access: current, discovery: null, phase: 'login', notice: '' }),
+      }) : await getMotherPersonalAccess(account.id);
       if (!live.current) return;
       if (access.motherAccountId !== account.id) throw new Error('mother_scope_changed');
       if (!canDiscover(access)) {

@@ -46,6 +46,7 @@ type OwnerAuthConfig struct {
 // OwnerAuthHandler owns the HTTP boundary for the Ticket 03 Owner security API.
 type OwnerAuthHandler struct {
 	pool                       *pgxpool.Pool
+	serviceContext             context.Context
 	keyRing                    auth.KeyRing
 	origins                    auth.OriginPolicy
 	dummyPasswordHash          string
@@ -134,9 +135,10 @@ func NewOwnerAuthHandler(config OwnerAuthConfig) (*OwnerControl, func(), error) 
 	if runtimeContext == nil {
 		runtimeContext = context.Background()
 	}
-	proxyContext, cancelProxy := context.WithCancel(runtimeContext)
+	serviceContext, cancelService := context.WithCancel(runtimeContext)
 	handler := &OwnerAuthHandler{
 		pool:                    pool,
+		serviceContext:          serviceContext,
 		keyRing:                 config.KeyRing,
 		origins:                 config.Origins,
 		dummyPasswordHash:       dummy,
@@ -171,13 +173,13 @@ func NewOwnerAuthHandler(config OwnerAuthConfig) (*OwnerControl, func(), error) 
 		handler.rotationCapability = officialRotationCapability{handler: handler}
 	}
 	if err := handler.proxyPool.restoreSettings(runtimeContext); err != nil {
-		cancelProxy()
+		cancelService()
 		pool.Close()
 		return nil, func() {}, err
 	}
 	go func() {
 		defer close(proxyDone)
-		handler.proxyPool.loop(proxyContext)
+		handler.proxyPool.loop(serviceContext)
 	}()
 	mux := http.NewServeMux()
 	ownerHandler := ownerapi.HandlerWithOptions(handler, ownerapi.StdHTTPServerOptions{
@@ -197,7 +199,7 @@ func NewOwnerAuthHandler(config OwnerAuthConfig) (*OwnerControl, func(), error) 
 		ownerHandler.ServeHTTP(w, r)
 	})
 	return &OwnerControl{Handler: noStore, Joiner: handler.operationJoiner}, func() {
-		cancelProxy()
+		cancelService()
 		<-proxyDone
 		pool.Close()
 	}, nil

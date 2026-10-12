@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"github.com/xft0202/Apophis-TeamSeatWatch/internal/browserenv"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -560,7 +561,7 @@ func TestRotationCandidateRefreshReservationRowOrder(t *testing.T) {
 
 type sequencedPersonalRenewer struct{ sequencedPersonalRefresh }
 
-func (r *sequencedPersonalRenewer) RenewPersonal(ctx context.Context, _ platform.PersonalSession) (platform.PersonalRefreshResult, error) {
+func (r *sequencedPersonalRenewer) RenewPersonal(ctx context.Context, _ platform.PersonalSession, _ browserenv.Environment) (platform.PersonalRefreshResult, error) {
 	return r.RefreshPersonal(ctx, platform.MotherMaterial{})
 }
 

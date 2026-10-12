@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/xft0202/Apophis-TeamSeatWatch/internal/browserenv"
 	"io"
 	"net/http"
 	"net/url"
@@ -140,6 +141,7 @@ func (a WorkspaceInvitation) Send(ctx context.Context, identifier string) (JoinA
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", browserAuthUA)
+	req.Header.Set("Accept-Language", browserenv.AcceptLanguage)
 	req.Header.Set("Origin", selectedWorkspaceOrigin)
 	req.Header.Set("Referer", selectedWorkspaceOrigin+"/admin/members?tab=members")
 	req.Header.Set("Oai-Device-Id", a.Access.DeviceID)

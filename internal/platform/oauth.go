@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/xft0202/Apophis-TeamSeatWatch/internal/browserenv"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -23,6 +24,7 @@ import (
 // DeliveryCredentialRequest is the input required by Apophis-TeamSeatWatch's
 // workspace-bound customer delivery flow.
 type DeliveryCredentialRequest struct {
+	Environment     browserenv.Environment
 	Identifier      string
 	Password        string
 	TOTPSecret      string
@@ -67,13 +69,16 @@ const (
 	maxAuthHops      = 12
 )
 
-const browserAuthUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"
+const browserAuthUA = browserenv.UserAgent
 
 var authChallengePattern = regexp.MustCompile(`(?:(?:"challenge_id"|"challengeId"|"mfaChallengeId"|"mfa_challenge_id")\s*:\s*"([A-Za-z0-9_-]{8,})"|/mfa-challenge/([A-Za-z0-9_-]{8,}))`)
 
 // CreateDeliveryCredentials performs the real account login and workspace-bound PKCE grant.
 // The client is lease-owned, so every stage shares its transport and cookie jar.
 func (r *HTTPReader) CreateDeliveryCredentials(ctx context.Context, input DeliveryCredentialRequest) (DeliveryCredentialSet, error) {
+	if err := input.Environment.Validate(); err != nil {
+		return DeliveryCredentialSet{}, err
+	}
 	if strings.TrimSpace(input.Identifier) == "" || strings.TrimSpace(input.Password) == "" || strings.TrimSpace(input.Workspace) == "" {
 		return DeliveryCredentialSet{}, errors.New("delivery credential input is incomplete")
 	}
@@ -84,16 +89,19 @@ func (r *HTTPReader) CreateDeliveryCredentials(ctx context.Context, input Delive
 	if input.PersonalSession != nil {
 		saved = *input.PersonalSession
 	}
-	personal, err := AcquirePersonal(ctx, PersonalWebRefresher{Browser: r.config.personalBrowser, Client: func(context.Context) (*http.Client, func(), error) { return r.client, nil, nil }}, MotherMaterial{LoginIdentifier: input.Identifier, Password: input.Password, TOTPSecret: input.TOTPSecret}, saved)
+	personal, err := AcquirePersonal(ctx, PersonalWebRefresher{Browser: r.config.personalBrowser, Client: func(context.Context) (*http.Client, func(), error) { return r.client, nil, nil }}, MotherMaterial{Environment: input.Environment, LoginIdentifier: input.Identifier, Password: input.Password, TOTPSecret: input.TOTPSecret}, saved)
 	if err != nil || personal.Status != "ready" {
 		return DeliveryCredentialSet{}, errors.New("account browser session unavailable")
 	}
+	ctx, stopExecution := context.WithTimeout(ctx, 120*time.Second)
+	defer stopExecution()
+	personal.Session.DeviceID = input.Environment.DeviceID
 	jar, err := personalCookieJar(personal.Session)
 	if err != nil {
 		return DeliveryCredentialSet{}, err
 	}
 	r.client.Jar = jar
-	transport, closeBrowser, err := r.config.workspaceBrowser(ctx, r.client, jar, input.Workspace)
+	transport, closeBrowser, err := r.config.workspaceBrowser(ctx, r.client, jar, input.Workspace, input.Environment)
 	if err != nil {
 		return DeliveryCredentialSet{}, oauthFailure("browser", err)
 	}
@@ -338,6 +346,7 @@ func (r *HTTPReader) authJSONWithJar(ctx context.Context, jar http.CookieJar, me
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", browserAuthUA)
+	req.Header.Set("Accept-Language", browserenv.AcceptLanguage)
 	origin := officialAuthBase
 	if strings.HasPrefix(target, officialChatBase) {
 		origin = officialChatBase
@@ -395,6 +404,7 @@ func (r *HTTPReader) followBrowserRedirect(ctx context.Context, jar http.CookieJ
 		}
 		req.Header.Set("Accept", "text/html,application/xhtml+xml,application/json")
 		req.Header.Set("User-Agent", browserAuthUA)
+		req.Header.Set("Accept-Language", browserenv.AcceptLanguage)
 		if referer != "" {
 			req.Header.Set("Referer", referer)
 		}
@@ -442,6 +452,7 @@ func captureWithJar(ctx context.Context, source *http.Client, jar http.CookieJar
 		}
 		req.Header.Set("Accept", "text/html,application/xhtml+xml,application/json")
 		req.Header.Set("User-Agent", browserAuthUA)
+		req.Header.Set("Accept-Language", browserenv.AcceptLanguage)
 		response, err := client.Do(req)
 		if err != nil {
 			return "", err

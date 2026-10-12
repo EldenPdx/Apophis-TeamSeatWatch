@@ -52,6 +52,13 @@ func (m *credentialMock) ExchangeCandidateWorkspace(_ context.Context, p platfor
 func (m *credentialMock) CreateCandidateOAuth(_ context.Context, r platform.DeliveryCredentialRequest, u string) (platform.DeliveryCredentialSet, error) {
 	m.oauthCalls++
 	m.marker("oauth")
+	if err := r.Environment.Validate(); err != nil {
+		m.t.Fatal("OAuth environment missing", err)
+	}
+	var profile string
+	if err := m.f.pool.QueryRow(context.Background(), `SELECT profile_id::text FROM tsw_account_browser_environments WHERE target_account_id=(SELECT candidate_account_id FROM tsw_rotation_candidate_join_intents WHERE slot_id=$1)`, m.slot).Scan(&profile); err != nil || profile != r.Environment.ProfileID.String() {
+		m.t.Fatal("OAuth changed candidate environment", err)
+	}
 	if r.Workspace != m.f.space.String() || r.Identifier != m.f.preview.Candidates[0].Identifier || r.Password != "password" || r.TOTPSecret != "JBSWY3DPEHPK3PXP" || u != "candidate-user" {
 		m.t.Fatal("wrong original grant")
 	}
@@ -107,7 +114,7 @@ func TestRotationJoinCredentialsSaveOriginalAndReplay(t *testing.T) {
 
 func credentialSources(t *testing.T, f *removalFixture) string {
 	t.Helper()
-	rows, err := f.pool.Query(context.Background(), `SELECT tablename FROM pg_tables WHERE schemaname='public' AND tablename LIKE 'tsw_%' AND tablename NOT LIKE 'tsw_rotation_join_credential_%' ORDER BY tablename`)
+	rows, err := f.pool.Query(context.Background(), `SELECT tablename FROM pg_tables WHERE schemaname='public' AND tablename LIKE 'tsw_%' AND tablename NOT LIKE 'tsw_rotation_join_credential_%' AND tablename <> 'tsw_account_browser_environments' ORDER BY tablename`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -590,6 +597,13 @@ type credentialRequestMock struct {
 func (m *credentialRequestMock) CreateCandidateOAuth(ctx context.Context, r platform.DeliveryCredentialRequest, u string) (platform.DeliveryCredentialSet, error) {
 	m.oauthCalls++
 	m.marker("oauth")
+	if err := r.Environment.Validate(); err != nil {
+		m.t.Fatal("OAuth environment missing", err)
+	}
+	var profile string
+	if err := m.f.pool.QueryRow(context.Background(), `SELECT profile_id::text FROM tsw_account_browser_environments WHERE target_account_id=(SELECT candidate_account_id FROM tsw_rotation_candidate_join_intents WHERE slot_id=$1)`, m.slot).Scan(&profile); err != nil || profile != r.Environment.ProfileID.String() {
+		m.t.Fatal("OAuth changed candidate environment", err)
+	}
 	for _, path := range []string{"/api/accounts/password/verify", "/oauth/token"} {
 		req, err := http.NewRequestWithContext(ctx, "POST", "https://auth.openai.com"+path, strings.NewReader("sealed-at-rest-only"))
 		if err != nil {

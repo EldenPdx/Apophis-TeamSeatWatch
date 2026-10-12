@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/xft0202/Apophis-TeamSeatWatch/internal/browserenv"
 	"github.com/xft0202/Apophis-TeamSeatWatch/internal/platform"
 	targetdomain "github.com/xft0202/Apophis-TeamSeatWatch/internal/target"
 	"github.com/xft0202/Apophis-TeamSeatWatch/internal/writerfence"
@@ -30,6 +31,15 @@ func (h *OwnerAuthHandler) saveRotationJoinCredentials(ctx context.Context, owne
 		return err
 	}
 	keys := rotationAuthorizationKeys(i.ownerID, auth.preview)
+	// Queue before claiming any bounded credential attempt or database gate.
+	// Owner/candidate/workspace authority is rechecked after admission below.
+	route, err := h.rotationJoinEgress(ctx)
+	if route != nil {
+		defer route.Release()
+	}
+	if err != nil || route == nil || route.Client() == nil || route.Client().Transport == nil || route.Client().Timeout <= 0 {
+		return platform.ErrRotationCredentialsUnavailable
+	}
 	bounded, cancel := context.WithTimeout(ctx, min(duration, 45*time.Second))
 	defer cancel()
 	gate, err := h.lockRemovalGate(bounded, i.workspaceID, keys)
@@ -91,13 +101,6 @@ func (h *OwnerAuthHandler) saveRotationJoinCredentials(ctx context.Context, owne
 	boundedLease, leaseCancel := context.WithDeadline(bounded, attempt.lease.expires)
 	defer leaseCancel()
 	bounded = boundedLease
-	route, err := h.rotationJoinEgress(bounded)
-	if route != nil {
-		defer route.Release()
-	}
-	if err != nil || route == nil || route.Client() == nil || route.Client().Transport == nil || route.Client().Timeout <= 0 {
-		return platform.ErrRotationCredentialsUnavailable
-	}
 	base := route.Client()
 	reads := h.rotationJoinAdapters(func(context.Context) (*http.Client, func(), error) { return base, nil, nil })
 	if reads.identity == nil || reads.members == nil || reads.discovery == nil {
@@ -274,6 +277,11 @@ func (h *OwnerAuthHandler) saveRotationJoinCredentials(ctx context.Context, owne
 		} else {
 			var request platform.DeliveryCredentialRequest
 			if err = local(func(tx pgx.Tx, _ joinAdmission) error {
+				var environmentErr error
+				request.Environment, environmentErr = browserenv.Ensure(bounded, tx, "target", i.candidateAccountID)
+				if environmentErr != nil {
+					return environmentErr
+				}
 				var pw, totp, recovery []byte
 				err := tx.QueryRow(bounded, `SELECT password_secret,totp_secret,recovery_secret FROM public.tsw_target_credentials WHERE target_account_id=$1 AND secret_revision=$2 AND materials_sealed AND material_status='complete'`, i.candidateAccountID, attempt.binding.revision).Scan(&pw, &totp, &recovery)
 				if err != nil {
@@ -294,6 +302,7 @@ func (h *OwnerAuthHandler) saveRotationJoinCredentials(ctx context.Context, owne
 			}); err != nil {
 				return err
 			}
+			request.PersonalSession = &pinned.candidate
 			oauth, actionErr := adapter.CreateCandidateOAuth(bounded, request, attempt.subject)
 			request = platform.DeliveryCredentialRequest{}
 			observed = time.Now().UTC().Truncate(time.Microsecond)

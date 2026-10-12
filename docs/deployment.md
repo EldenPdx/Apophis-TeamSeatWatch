@@ -14,6 +14,8 @@ python3 deploy/manage.py start
 
 第一次会下载构建依赖，请等待构建完成。按提示设置至少 **14 个字符**的管理员密码，输入时不回显。出现 **“已就绪 / Ready”** 后，安装完成。
 
+构建入口先把固定 SHA256 的官方 ShardX 152.0.7977.65 ZIP 缓存在源码目录 `.browser-artifacts/`，校验后解压到镜像；最终镜像仅含未修改内核。直接运行 `docker build` 前执行 `python3 tools/prepare-browser.py`；已有相同制品可用 `--source /path/to/ShardX-Linux.zip` 复用。每个账号在首次请求会话时建立独立档案，存于 control 的 `browser-profiles` 持久卷（容器内 `/var/lib/teamseatwatch/browser-profiles`），重启和重新创建容器复用此卷。空闲档案不启动浏览器。全局业务并发首次默认5，已保存的代理管理运行参数继续生效。
+
 启动工具会准备数据库、加密资料、证书和两个访问入口；再次运行会沿用已有数据与管理员。安装资料默认放在 `~/.local/share/apophis-teamseatwatch`，独立于源码。已有手工安装应先保留原备份；此入口创建独立安装，不自动接管旧容器或导入旧数据。
 
 ## 2. 打开工作台

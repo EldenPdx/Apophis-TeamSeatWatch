@@ -84,6 +84,45 @@ export const workspaceSyncProgress: Record<WorkspaceSyncStage, string> = {
 
 export class WorkspaceRecoveryError extends Error {}
 
+export async function loginMotherAndObserve(options: {
+  motherId: string;
+  login: (motherId: string) => Promise<PersonalAccess>;
+  personal: (motherId: string) => Promise<PersonalAccess>;
+  isCurrent: () => boolean;
+  onAccess?: (access: PersonalAccess) => void;
+}): Promise<PersonalAccess> {
+  const { motherId, login, personal, isCurrent, onAccess } = options;
+  const check = () => { if (!isCurrent()) throw new WorkspaceRecoveryError('当前选择已变化，本次母号操作已停止。'); };
+  const scoped = (access: PersonalAccess) => {
+    check();
+    if (access.motherAccountId !== motherId) throw new WorkspaceRecoveryError('登录状态属于其他母号，本次操作已停止。');
+    return access;
+  };
+  check();
+  const startedAt = Date.now();
+  let access: PersonalAccess;
+  try { access = await login(motherId); }
+  catch (error: unknown) {
+    check();
+    const status = error && typeof error === 'object' && 'status' in error ? error.status : undefined;
+    if (typeof status === 'number' && status < 500) throw error;
+    // An admitted login survives a lost POST response. Observe its saved state
+    // without issuing another login or bypassing an Owner denial on the read.
+    access = scoped(await personal(motherId));
+    if (access.status !== 'verifying' && access.status !== 'ready' &&
+        !(access.checkedAt && Date.parse(access.checkedAt) >= startedAt - 1000)) throw error;
+  }
+  access = scoped(access);
+  onAccess?.(access);
+  while (access.status === 'verifying') {
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    check();
+    access = scoped(await personal(motherId));
+    onAccess?.(access);
+  }
+  return access;
+}
+
 export function motherLoginFailure(access: PersonalAccess): string {
   if (access.status === 'missing_credentials') return '自动登录未执行：母号缺少有效的密码或 2FA 资料。请修正母号资料后同步。';
   if (access.status === 'invalid_login') return '自动登录失败：ChatGPT 未接受保存的登录资料，返回结果未区分密码和 2FA。请核对母号资料。';
@@ -111,7 +150,7 @@ export async function connectSelectedWorkspace(options: {
   motherId: string; workspaceId: string; access: Access | null;
   exchange: (workspaceId: string, motherId: string) => Promise<Access>;
   login: (motherId: string) => Promise<PersonalAccess>;
-  personal?: (motherId: string) => Promise<PersonalAccess>;
+  personal: (motherId: string) => Promise<PersonalAccess>;
   discover: (motherId: string) => Promise<Discovery>;
   onStage: (stage: WorkspaceSyncStage) => void;
   isCurrent: () => boolean;
@@ -126,7 +165,7 @@ export async function connectSelectedWorkspace(options: {
   check();
   let access = options.access;
   if (access?.status === 'ready' && access.expiresAt && Date.parse(access.expiresAt) > Date.now() + 30_000) return scoped(access);
-  if (!workspaceLoginRequired(access) && options.personal) {
+  if (!workspaceLoginRequired(access)) {
     const personal = await options.personal(motherId); check();
     if (personal.motherAccountId !== motherId) throw new WorkspaceRecoveryError('登录状态属于其他母号，本次同步已停止。');
     if (['session_expired', 'not_verified'].includes(personal.status)) access = { motherAccountId: motherId, workspaceId, status: 'failed', failure: { code: 'workspace_session_expired' } };
@@ -136,8 +175,7 @@ export async function connectSelectedWorkspace(options: {
   }
   if (!workspaceLoginRequired(access)) return access!;
   onStage('login');
-  const personal = await login(motherId); check();
-  if (personal.motherAccountId !== motherId) throw new WorkspaceRecoveryError('自动登录返回了其他母号，本次同步已停止。');
+  const personal = await loginMotherAndObserve({ motherId, login, personal: options.personal, isCurrent }); check();
   if (personal.status !== 'ready') throw new WorkspaceRecoveryError(motherLoginFailure(personal));
   onStage('discovery');
   const discovery = await discover(motherId); check();

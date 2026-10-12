@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/xft0202/Apophis-TeamSeatWatch/internal/browserenv"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -84,10 +85,10 @@ func TestRotationJoinHTTPRegisteredRunVerifyPartialRepairAndRedaction(t *testing
 	// adapter implementations and the same generated registration as production.
 	f.h.rotationCredentialAdapters = func(c platform.DiscoveryClient) platform.RotationCredentialAdapter {
 		return platform.OfficialRotationCredentialAdapter{Client: c,
-			Browser: func(_ context.Context, client *http.Client, _ http.CookieJar) (http.RoundTripper, func(), error) {
+			Browser: func(_ context.Context, client *http.Client, _ http.CookieJar, _ browserenv.Environment) (http.RoundTripper, func(), error) {
 				return client.Transport, func() {}, nil
 			},
-			WorkspaceBrowser: func(_ context.Context, client *http.Client, _ http.CookieJar, workspace string) (http.RoundTripper, func(), error) {
+			WorkspaceBrowser: func(_ context.Context, client *http.Client, _ http.CookieJar, workspace string, _ browserenv.Environment) (http.RoundTripper, func(), error) {
 				if workspace != f.space.String() {
 					t.Fatal("OAuth browser lost original workspace")
 				}

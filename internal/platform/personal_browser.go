@@ -8,9 +8,12 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/chromedp/cdproto"
@@ -20,28 +23,30 @@ import (
 	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/cdproto/storage"
 	"github.com/chromedp/chromedp"
+	"github.com/xft0202/Apophis-TeamSeatWatch/internal/browserenv"
 	"github.com/xft0202/Apophis-TeamSeatWatch/internal/egress"
 )
 
 // PersonalBrowserFactory owns one isolated browser for the whole Personal login
 // attempt. Its network is bound to the caller's existing egress lease.
-type PersonalBrowserFactory func(context.Context, *http.Client, http.CookieJar) (http.RoundTripper, func(), error)
+type PersonalBrowserFactory func(context.Context, *http.Client, http.CookieJar, browserenv.Environment) (http.RoundTripper, func(), error)
 
 type personalBrowserTransport struct {
 	browser              context.Context
 	jar                  http.CookieJar
 	mu                   sync.Mutex
 	choice               atomic.Pointer[personalChoice]
+	authorization        atomic.Pointer[personalAuthorization]
 	validateContinuation func(*http.Request) error
 	terminalURL          func() string
 }
 
-func NewPersonalBrowser(ctx context.Context, source *http.Client, jar http.CookieJar) (http.RoundTripper, func(), error) {
+func NewPersonalBrowser(ctx context.Context, source *http.Client, jar http.CookieJar, environment browserenv.Environment) (http.RoundTripper, func(), error) {
 	if jar == nil {
 		return nil, nil, errors.New("personal browser cookie jar unavailable")
 	}
 	transport := &personalBrowserTransport{jar: jar, validateContinuation: validatePersonalRequest}
-	browser, closeBrowser, _, err := personalBrowser(ctx, source, transport.allowedRequest)
+	browser, closeBrowser, _, err := personalBrowser(ctx, source, transport.allowedRequest, environment)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -71,19 +76,56 @@ func NewPersonalBrowser(ctx context.Context, source *http.Client, jar http.Cooki
 	return transport, closeBrowser, nil
 }
 
-func personalBrowser(ctx context.Context, source *http.Client, allowed func(*network.Request) bool) (context.Context, func(), *egress.BrowserRoute, error) {
-	route, err := egress.StartBrowserRoute(ctx, source)
+func personalBrowser(ctx context.Context, source *http.Client, allowed func(*network.Request) bool, environment browserenv.Environment) (context.Context, func(), *egress.BrowserRoute, error) {
+	return launchBrowser(ctx, source, allowed, environment, os.Getenv("TSW_BROWSER_PROFILES_DIR"), nil)
+}
+
+func launchBrowser(ctx context.Context, source *http.Client, allowed func(*network.Request) bool, environment browserenv.Environment, root string, extra []chromedp.ExecAllocatorOption) (context.Context, func(), *egress.BrowserRoute, error) {
+	if err := browserenv.VerifyExecutable(); err != nil {
+		return nil, nil, nil, err
+	}
+	profile, err := browserenv.Open(ctx, root, environment)
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	route, err := egress.StartBrowserRoute(ctx, source)
+	if err != nil {
+		profile.Close()
+		return nil, nil, nil, err
+	}
 	opts := append([]chromedp.ExecAllocatorOption{}, chromedp.DefaultExecAllocatorOptions[:]...)
-	opts = append(opts, chromedp.ExecPath("/usr/bin/chromium"), chromedp.NoSandbox,
+	opts = append(opts, chromedp.ExecPath(browserenv.Executable), chromedp.UserDataDir(profile.Directory), chromedp.NoSandbox,
 		chromedp.Flag("headless", false), chromedp.Flag("enable-automation", false),
+		// Startup flag warnings consume viewport height asynchronously. Suppress
+		// that browser UI so the persisted native window recipe stays coherent.
+		chromedp.Flag("test-type", true),
 		chromedp.Flag("disable-blink-features", "AutomationControlled"),
-		chromedp.Flag("disable-quic", true), chromedp.Flag("proxy-bypass-list", "<-loopback>"), chromedp.ProxyServer(route.URL()))
+		chromedp.Flag("fingerprint-profile", profile.RecipePath), chromedp.Flag("shardx-webrtc-policy", "block"),
+		chromedp.Flag("force-webrtc-ip-handling-policy", "disable_non_proxied_udp"),
+		chromedp.Flag("disk-cache-size", "16777216"), chromedp.Flag("media-cache-size", "4194304"),
+		chromedp.Flag("use-angle", "swiftshader"), chromedp.Flag("enable-unsafe-swiftshader", true),
+		chromedp.Flag("disable-quic", true), chromedp.Flag("proxy-bypass-list", "<-loopback>"), chromedp.ProxyServer(route.URL()),
+		chromedp.ModifyCmdFunc(func(cmd *exec.Cmd) {
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
+			cmd.Env = append(os.Environ(), profile.ProcessEnvironment())
+		}))
+	opts = append(opts, extra...)
 	allocator, closeAllocator := chromedp.NewExecAllocator(ctx, opts...)
 	browser, closeBrowser := chromedp.NewContext(allocator)
-	close := func() { closeBrowser(); closeAllocator(); route.Close() }
+	var once sync.Once
+	close := func() {
+		once.Do(func() {
+			// Graceful Browser.close flushes storage. Allocator cancellation waits for
+			// the root; the profile barrier then removes any surviving subprocesses.
+			if chromedp.FromContext(browser).Browser != nil {
+				_ = chromedp.Cancel(browser)
+			}
+			closeBrowser()
+			closeAllocator()
+			profile.Close()
+			route.Close()
+		})
+	}
 	if err = chromedp.Do(browser); err != nil {
 		close()
 		return nil, nil, nil, errors.New("personal browser unavailable")
@@ -149,11 +191,10 @@ func (t *personalBrowserTransport) RoundTrip(req *http.Request) (*http.Response,
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if choice, ok := req.Context().Value(personalChoiceContextKey{}).(*personalChoice); ok && personalChoiceRequest(req) {
-		t.choice.Store(choice)
-		defer t.choice.Store(nil)
-	}
-	ctx, cancel := context.WithCancel(t.browser)
+	execution := t.bindRequest(t.browser, req)
+	defer t.authorization.Store(nil)
+	defer t.choice.Store(nil)
+	ctx, cancel := context.WithCancel(execution)
 	defer cancel()
 	stop := context.AfterFunc(req.Context(), cancel)
 	defer stop()
@@ -254,8 +295,11 @@ func (t *personalBrowserTransport) navigate(ctx context.Context, target string) 
 		return nil, "", errors.New("personal browser page unavailable")
 	}
 	final, err := http.NewRequestWithContext(ctx, http.MethodGet, page.URL, nil)
-	if err != nil || t.validateContinuation(final) != nil {
-		return nil, "", errors.New("personal browser continuation denied")
+	if err == nil {
+		err = t.validateContinuation(final)
+	}
+	if err != nil {
+		return nil, "", personalRequestDenial("personal browser continuation denied")
 	}
 	return browserDocumentResponse(result, final, io.NopCloser(strings.NewReader(page.Body))), page.URL, nil
 }
@@ -450,9 +494,15 @@ func (t *personalBrowserTransport) allowedRequest(req *network.Request) bool {
 	if allowedPersonalBrowserRequest(req) {
 		return true
 	}
-	choice := t.choice.Load()
-	if req == nil || choice == nil {
+	if req == nil {
 		return false
+	}
+	ctx := context.Background()
+	if authorization := t.authorization.Load(); authorization != nil {
+		ctx = context.WithValue(ctx, personalAuthorizationContextKey{}, authorization)
+	}
+	if choice := t.choice.Load(); choice != nil {
+		ctx = context.WithValue(ctx, personalChoiceContextKey{}, choice)
 	}
 	var body []byte
 	for _, entry := range req.PostDataEntries {
@@ -461,6 +511,23 @@ func (t *personalBrowserTransport) allowedRequest(req *network.Request) bool {
 		}
 		body = append(body, entry.Bytes...)
 	}
-	request, err := http.NewRequestWithContext(context.WithValue(context.Background(), personalChoiceContextKey{}, choice), req.Method, req.URL, bytes.NewReader(body))
+	request, err := http.NewRequestWithContext(ctx, req.Method, req.URL, bytes.NewReader(body))
 	return err == nil && validatePersonalRequest(request) == nil
+}
+
+// Explicit HTTP requests and the browser's script/redirect requests share the
+// same immutable authorization. Navigation's final continuation retains it.
+func (t *personalBrowserTransport) bindRequest(ctx context.Context, req *http.Request) context.Context {
+	authorization, _ := req.Context().Value(personalAuthorizationContextKey{}).(*personalAuthorization)
+	t.authorization.Store(authorization)
+	if authorization != nil {
+		ctx = context.WithValue(ctx, personalAuthorizationContextKey{}, authorization)
+	}
+	var choice *personalChoice
+	if personalChoiceRequest(req) {
+		choice, _ = req.Context().Value(personalChoiceContextKey{}).(*personalChoice)
+		ctx = context.WithValue(ctx, personalChoiceContextKey{}, choice)
+	}
+	t.choice.Store(choice)
+	return ctx
 }
