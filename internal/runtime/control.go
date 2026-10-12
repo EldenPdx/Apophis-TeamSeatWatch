@@ -104,10 +104,8 @@ func NewControlHandlers(config ControlConfig) (ControlHandlers, error) {
 		TargetProber: func(client *http.Client, credentials platform.Credentials) (*platform.HTTPReader, error) {
 			return platformConfig.Reader(client, credentials)
 		},
-		Joiner: ownerAuth.Joiner,
-		Remover: func(client *http.Client, credentials platform.Credentials) (platform.Remover, error) {
-			return platformConfig.Reader(client, credentials)
-		},
+		Joiner:  ownerAuth.Joiner,
+		Remover: ownerAuth.Remover,
 		DeliveryAdapter: func(client *http.Client, credentials platform.Credentials) (platform.DeliveryAdapter, error) {
 			return platformConfig.Reader(client, credentials)
 		},

@@ -21,7 +21,7 @@ const batchRotationJoinsSQL = `
 const batchRotationStateSQL = `CASE
  WHEN batch.status='ended' AND membership_facts.joined_count>0
   AND membership_facts.joined_count=membership_facts.removed_count
-  AND removal_operation.status='succeeded' AND removal_facts.total=membership_facts.joined_count
+  AND removal_operation.status='succeeded' AND removal_facts.total>0
   AND removal_facts.succeeded=removal_facts.total THEN 'completed'
  WHEN removal_facts.unknown>0 OR batch.status='ended' THEN 'pending_check'
  WHEN removal_facts.failed>0 OR (batch.status='removing' AND removal_operation.status IN ('failed','blocked')) THEN 'needs_attention'

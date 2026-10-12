@@ -23,6 +23,8 @@ const selectedMaxMembers = 999
 // egress-lease client; redirects and cookie jars are disabled on the copy.
 type OfficialSelectedWorkspaceReader struct {
 	Client DiscoveryClient
+	// Removal snapshots retain exchanged access validation and send only its bearer.
+	BearerOnly bool
 	// ResolveMemberIdentifiers supplies only identities previously confirmed by
 	// authenticated joining in this selected workspace. It cannot infer members.
 	ResolveMemberIdentifiers func(context.Context, []string) (map[string]string, error)
@@ -35,6 +37,9 @@ func (r OfficialSelectedWorkspaceReader) VerifySelectedWorkspace(ctx context.Con
 	if r.Client == nil || !ValidateWorkspaceAccess(access, workspaceID, time.Now()) ||
 		strings.TrimSpace(workspaceID) == "" || len(workspaceID) > 255 || strings.ContainsAny(workspaceID, "\r\n\x00") {
 		return facts, nil
+	}
+	if r.BearerOnly {
+		access.Cookies = nil
 	}
 	base, release, err := r.Client(ctx)
 	if release != nil {

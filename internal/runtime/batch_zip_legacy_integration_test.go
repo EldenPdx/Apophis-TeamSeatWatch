@@ -6,8 +6,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"net/http"
-	"strings"
 	"testing"
 	"time"
 
@@ -77,10 +77,15 @@ func zipLegacyPublicationFixture(t *testing.T, f *removalFixture) zipLegacyPubli
 	if err = tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
+	var value platform.DeliveryCredentialSet
+	if err := json.Unmarshal(accountDeliveryFixture(t, time.Now().UTC(), workspace.String(), "mock-subject"), &value); err != nil {
+		t.Fatal(err)
+	}
+	value.RefreshToken = "mock-refresh"
 	return zipLegacyPublication{
 		store: task.NewStore(f.pool, f.h.keyRing), item: item, attempt: attempt,
 		target: task.DeliveryTarget{WorkspaceID: workspace.String(), PlatformWorkspace: workspace.String(), PlatformSubjectID: "mock-subject"},
-		value:  platform.DeliveryCredentialSet{AccessToken: "mock-access", RefreshToken: "mock-refresh", IDToken: "mock-id", WorkspaceID: workspace.String(), PlatformSubjectID: "mock-subject"},
+		value:  value,
 		probe:  platform.DeliveryLiveness{Status: "ok", HTTPStatus: 200, WorkspaceID: workspace.String(), PlatformSubjectID: "mock-subject", ObservedAt: time.Now().UTC()}, secret: secret,
 	}
 }
@@ -99,8 +104,17 @@ func zipLegacyCustomerReget(t *testing.T, f *removalFixture, l zipLegacyPublicat
 	cookie := claim.Result().Cookies()[0]
 	first := publicRedeemRequest(t, h, http.MethodPost, "/api/public/v1/redeem/download", nil, cookie)
 	second := publicRedeemRequest(t, h, http.MethodPost, "/api/public/v1/redeem/download", nil, cookie)
-	if first.Code != http.StatusOK || second.Code != http.StatusOK || !bytes.Equal(first.Body.Bytes(), second.Body.Bytes()) || !strings.Contains(string(accountCardZIPPayload(t, first)), "mock-access") {
+	if first.Code != http.StatusOK || second.Code != http.StatusOK || !bytes.Equal(first.Body.Bytes(), second.Body.Bytes()) {
 		t.Fatalf("original legacy version reget: %d/%d", first.Code, second.Code)
+	}
+	bundle := accountDeliveryBundle(t, first.Body.Bytes())
+	accounts, ok := bundle["accounts"].([]any)
+	if !ok || len(accounts) != 1 {
+		t.Fatal("legacy ZIP must contain only its original account")
+	}
+	credentials := accounts[0].(map[string]any)["credentials"].(map[string]any)
+	if credentials["access_token"] != l.value.AccessToken || credentials["refresh_token"] != "mock-refresh" || credentials["chatgpt_account_id"] != l.item.WorkspaceID || credentials["chatgpt_user_id"] != "mock-subject" {
+		t.Fatal("legacy ZIP changed the original authorized identity or credentials")
 	}
 }
 

@@ -7,9 +7,9 @@ const preflightOnly = process.argv[2] === '--preflight';
 if (process.argv[2] && !preflightOnly) {
   throw new Error('usage: node tools/verify.mjs [--preflight]');
 }
-const fixedGo = process.env.TSW_GO_BIN ?? 'E:\\TeamSeatWatchTools\\go\\1.27.1\\go\\bin\\go.exe';
+const fixedGo = process.env.TSW_GO_BIN ?? 'E:\\TeamSeatWatchTools\\go\\1.27.2\\go\\bin\\go.exe';
 const toolBin = 'E:\\TeamSeatWatchTools\\bin';
-const goBin = 'E:\\TeamSeatWatchTools\\go\\1.27.1\\go\\bin';
+const goBin = 'E:\\TeamSeatWatchTools\\go\\1.27.2\\go\\bin';
 const goPathBin = 'E:\\TeamSeatWatchTools\\gopath\\bin';
 const inheritedPath = process.env.Path ?? process.env.PATH ?? '';
 const verificationEnv = windows
@@ -31,7 +31,7 @@ if (windows && goCommand === 'go') {
 }
 if (windows) {
   const preflight = spawnSync(goCommand, ['version'], { cwd: process.cwd(), env: verificationEnv, encoding: 'utf8' });
-  if (preflight.error || preflight.status !== 0 || !String(preflight.stdout).includes('go1.27.1')) {
+  if (preflight.error || preflight.status !== 0 || !String(preflight.stdout).includes('go1.27.2')) {
     process.stderr.write(`verify: Go preflight failed\n${preflight.stderr ?? ''}`);
     process.exit(preflight.status ?? 1);
   }

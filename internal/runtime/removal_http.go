@@ -53,10 +53,13 @@ func (h *OwnerAuthHandler) getBatchRemovalPreview(w http.ResponseWriter, r *http
 		h.removalFailure(w, r, err)
 		return
 	}
-	preview, err := removalPreview(r.Context(), tx, batch)
+	preview, err := h.currentRemovalPreview(r.Context(), tx, batch)
 	if err != nil {
 		h.removalFailure(w, r, err)
 		return
+	}
+	if params.Manual != nil && *params.Manual {
+		allowEarlyRemoval(&preview)
 	}
 	// Authorization always checks the complete frozen scope. Only the requested
 	// member page and a bounded difference sample cross the Owner API boundary.
@@ -76,7 +79,7 @@ func (h *OwnerAuthHandler) getBatchRemovalPreview(w http.ResponseWriter, r *http
 }
 
 func removalPreview(ctx context.Context, query removalQuerier, batch ownerapi.Batch) (ownerapi.RemovalPreview, error) {
-	preview := ownerapi.RemovalPreview{Batch: batch, Targets: []ownerapi.RemovalPreviewTarget{}, Differences: []ownerapi.RemovalDifference{}, Blockers: []ownerapi.PreviewBlocker{}, SnapshotCompleteness: "unknown"}
+	preview := ownerapi.RemovalPreview{SnapshotCompleteness: "unknown"}
 	var operationalState, ownerIdentifier string
 	var evidenceExpiresAt, snapshotExpiresAt *time.Time
 	var snapshotID, snapshotSource *string
@@ -95,8 +98,49 @@ func removalPreview(ctx context.Context, query removalQuerier, batch ownerapi.Ba
 	if err != nil {
 		return preview, err
 	}
-	preview.SnapshotObservedAt, preview.SnapshotSource, preview.DeclaredMemberCount = snapshotObserved, snapshotSource, declaredCount
 
+	entries := []removalSnapshotEntry{}
+	if snapshotID != nil {
+		rows, err := query.Query(ctx, `SELECT member_identifier,COALESCE(platform_role,'') FROM tsw_workspace_member_snapshot_entries WHERE snapshot_id=$1 AND entry_kind='member' ORDER BY member_identifier`, *snapshotID)
+		if err != nil {
+			return preview, err
+		}
+		for rows.Next() {
+			var entry removalSnapshotEntry
+			if err := rows.Scan(&entry.Identifier, &entry.Role); err != nil {
+				rows.Close()
+				return preview, err
+			}
+			entries = append(entries, entry)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return preview, err
+		}
+	}
+
+	return removalPreviewWithSnapshot(ctx, query, batch, removalSnapshot{operationalState: operationalState, ownerIdentifier: ownerIdentifier, evidenceExpiresAt: evidenceExpiresAt, snapshotExpiresAt: snapshotExpiresAt, snapshotObserved: snapshotObserved, available: snapshotID != nil, snapshotSource: snapshotSource, declaredCount: declaredCount, completeness: preview.SnapshotCompleteness, entries: entries})
+}
+
+type removalSnapshot struct {
+	operationalState, ownerIdentifier                      string
+	evidenceExpiresAt, snapshotExpiresAt, snapshotObserved *time.Time
+	snapshotSource                                         *string
+	available                                              bool
+	declaredCount                                          *int
+	completeness                                           string
+	entries                                                []removalSnapshotEntry
+}
+
+func removalPreviewWithSnapshot(ctx context.Context, query removalQuerier, batch ownerapi.Batch, snapshot removalSnapshot) (ownerapi.RemovalPreview, error) {
+	preview := ownerapi.RemovalPreview{Batch: batch, Targets: []ownerapi.RemovalPreviewTarget{}, Differences: []ownerapi.RemovalDifference{}, Blockers: []ownerapi.PreviewBlocker{}, SnapshotCompleteness: snapshot.completeness, SnapshotObservedAt: snapshot.snapshotObserved, SnapshotSource: snapshot.snapshotSource, DeclaredMemberCount: snapshot.declaredCount}
+	var joinUnsettled bool
+	if err := query.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM tsw_operations operation JOIN tsw_operation_targets target ON target.operation_id=operation.id WHERE operation.batch_id=$1 AND operation.operation_type='join' AND (target.status NOT IN ('succeeded','failed') OR target.platform_request_may_have_reached))`, batch.Id).Scan(&joinUnsettled); err != nil {
+		return preview, err
+	}
+	if joinUnsettled {
+		addRemovalBlocker(&preview, "join_not_settled", "本批次仍有加入任务或待核验结果，请先完成加入核验")
+	}
 	targetRows, err := query.Query(ctx, `SELECT membership.id::text,membership.target_account_id::text,target.display_label,target.identifier,membership.state,membership.joined_at,membership.removed_at
 		FROM tsw_batch_memberships membership
 		JOIN tsw_target_accounts target ON target.id=membership.target_account_id
@@ -130,26 +174,6 @@ func removalPreview(ctx context.Context, query removalQuerier, batch ownerapi.Ba
 		return preview, err
 	}
 
-	entries := []removalSnapshotEntry{}
-	if snapshotID != nil {
-		rows, err := query.Query(ctx, `SELECT member_identifier,COALESCE(platform_role,'') FROM tsw_workspace_member_snapshot_entries WHERE snapshot_id=$1 AND entry_kind='member' ORDER BY member_identifier`, *snapshotID)
-		if err != nil {
-			return preview, err
-		}
-		for rows.Next() {
-			var entry removalSnapshotEntry
-			if err := rows.Scan(&entry.Identifier, &entry.Role); err != nil {
-				rows.Close()
-				return preview, err
-			}
-			entries = append(entries, entry)
-		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
-			return preview, err
-		}
-	}
-
 	otherBatchIdentifiers := map[string]bool{}
 	otherRows, err := query.Query(ctx, `SELECT target.identifier FROM tsw_batch_memberships membership
 		JOIN tsw_batches other_batch ON other_batch.id=membership.batch_id
@@ -173,10 +197,10 @@ func removalPreview(ctx context.Context, query removalQuerier, batch ownerapi.Ba
 
 	entryByIdentifier := map[string][]removalSnapshotEntry{}
 	ownerPresent := false
-	for _, entry := range entries {
+	for _, entry := range snapshot.entries {
 		identity := strings.ToLower(strings.TrimSpace(entry.Identifier))
 		entryByIdentifier[identity] = append(entryByIdentifier[identity], entry)
-		if identity == strings.ToLower(strings.TrimSpace(ownerIdentifier)) && removalOwnerRole(entry.Role) {
+		if identity == strings.ToLower(strings.TrimSpace(snapshot.ownerIdentifier)) && removalOwnerRole(entry.Role) {
 			ownerPresent = true
 		}
 		if targetIdentifiers[identity] {
@@ -191,8 +215,13 @@ func removalPreview(ctx context.Context, query removalQuerier, batch ownerapi.Ba
 		preview.Differences = append(preview.Differences, ownerapi.RemovalDifference{Identifier: entry.Identifier, Role: entry.Role, Reason: reason})
 	}
 
-	exact := snapshotID != nil && preview.SnapshotCompleteness == "complete" && declaredCount != nil && *declaredCount == len(entries) &&
-		evidenceExpiresAt != nil && evidenceExpiresAt.After(time.Now()) && snapshotExpiresAt != nil && snapshotExpiresAt.After(time.Now())
+	exact := snapshot.available && preview.SnapshotCompleteness == "complete" && snapshot.declaredCount != nil && *snapshot.declaredCount == len(snapshot.entries) &&
+		snapshot.evidenceExpiresAt != nil && snapshot.evidenceExpiresAt.After(time.Now()) && snapshot.snapshotExpiresAt != nil && snapshot.snapshotExpiresAt.After(time.Now())
+	for _, target := range preview.Targets {
+		if target.State != ownerapi.Removed && target.JoinedAt != nil && (snapshot.snapshotObserved == nil || target.JoinedAt.After(*snapshot.snapshotObserved)) {
+			exact = false
+		}
+	}
 	if len(preview.Targets) == 0 {
 		addRemovalBlocker(&preview, "removal_targets_empty", "当前批没有已确认的成员关系")
 	}
@@ -202,7 +231,7 @@ func removalPreview(ctx context.Context, query removalQuerier, batch ownerapi.Ba
 	if batch.PlannedAt.After(time.Now()) {
 		addRemovalBlocker(&preview, "planned_time_not_reached", "计划处理时间尚未到达")
 	}
-	if operationalState != "operational" {
+	if snapshot.operationalState != "operational" {
 		addRemovalBlocker(&preview, "workspace_not_operational", "团队空间当前没有明确可运营证据")
 	}
 	if !exact {
@@ -242,14 +271,34 @@ func addRemovalBlocker(preview *ownerapi.RemovalPreview, code, message string) {
 	preview.Blockers = append(preview.Blockers, ownerapi.PreviewBlocker{Code: code, Message: message})
 }
 
+func allowEarlyRemoval(preview *ownerapi.RemovalPreview) {
+	blockers := preview.Blockers[:0]
+	for _, blocker := range preview.Blockers {
+		if blocker.Code != "planned_time_not_reached" {
+			blockers = append(blockers, blocker)
+		}
+	}
+	preview.Blockers = blockers
+	preview.CanProceed = len(blockers) == 0
+}
+
 func (h *OwnerAuthHandler) createRemovalOperation(w http.ResponseWriter, r *http.Request) {
 	owner, ok := h.authenticated(w, r, true)
 	if !ok {
 		return
 	}
-	var request ownerapi.CreateRemovalOperationJSONRequestBody
-	if !decodeJSON(w, r, &request) || !bool(request.Confirm) || !validConcurrency(request.Concurrency) {
+	request := struct {
+		ownerapi.CreateRemovalOperationJSONRequestBody
+		MembershipIds json.RawMessage `json:"membershipIds"`
+	}{}
+	if !decodeJSON(w, r, &request) || !bool(request.Confirm) || !validConcurrency(request.Concurrency) || !validLength(request.IdempotencyKey, 8, 128) {
 		h.rejectOwnerMutation(w, r, owner, "remove.create", "remove_confirmation_required", http.StatusUnprocessableEntity, "remove_confirmation_required", "Confirmation Required", "Explicit Owner confirmation is required")
+		return
+	}
+	manual := request.Manual != nil && *request.Manual
+	var selectedMemberships []uuid.UUID
+	if request.MembershipIds != nil && (!manual || json.Unmarshal(request.MembershipIds, &selectedMemberships) != nil || !validUUIDList(selectedMemberships)) {
+		h.rejectOwnerMutation(w, r, owner, "remove.create", "invalid_request", http.StatusUnprocessableEntity, "invalid_removal_memberships", "Invalid Request", "Manual removal requires unique batch memberships")
 		return
 	}
 	batchID := r.PathValue("batchId")
@@ -259,6 +308,11 @@ func (h *OwnerAuthHandler) createRemovalOperation(w http.ResponseWriter, r *http
 		return
 	}
 	defer tx.Rollback(r.Context())
+	// OAuth publication locks accounts before batch rows; keep that order here.
+	if _, err = tx.Exec(r.Context(), `SELECT pg_advisory_xact_lock(hashtextextended('tsw.rotation.action.target_account/'||target_account_id::text,0)) FROM (SELECT DISTINCT target_account_id FROM tsw_batch_memberships WHERE batch_id=$1 ORDER BY target_account_id) accounts`, batchID); err != nil {
+		h.removalFailure(w, r, err)
+		return
+	}
 	var lockedBatchID string
 	if err = tx.QueryRow(r.Context(), `SELECT id FROM tsw_batches WHERE id=$1 FOR UPDATE`, batchID).Scan(&lockedBatchID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -273,17 +327,40 @@ func (h *OwnerAuthHandler) createRemovalOperation(w http.ResponseWriter, r *http
 		h.removalFailure(w, r, err)
 		return
 	}
-	preview, err := removalPreview(r.Context(), tx, batch)
+	preview, err := h.currentRemovalPreview(r.Context(), tx, batch)
 	if err != nil {
 		h.removalFailure(w, r, err)
 		return
 	}
+	if manual {
+		allowEarlyRemoval(&preview)
+	}
 	membershipIDs := make([]string, 0, len(preview.Targets))
+	activeMemberships := make(map[string]bool, len(preview.Targets))
 	for _, target := range preview.Targets {
-		membershipIDs = append(membershipIDs, target.MembershipId.String())
+		membershipID := target.MembershipId.String()
+		if target.State != ownerapi.Removed {
+			activeMemberships[membershipID] = true
+		}
+		if !manual || target.State != ownerapi.Removed {
+			membershipIDs = append(membershipIDs, membershipID)
+		}
+	}
+	if request.MembershipIds != nil {
+		membershipIDs = membershipIDs[:0]
+		for _, membershipID := range selectedMemberships {
+			membershipIDs = append(membershipIDs, membershipID.String())
+		}
 	}
 	sort.Strings(membershipIDs)
 	requestHash := sha256.Sum256([]byte("teamseatwatch:remove:v1\x00" + batchID + "\x00" + strings.Join(membershipIDs, "\x00")))
+	if manual {
+		scope := "all"
+		if request.MembershipIds != nil {
+			scope = "members\x00" + strings.Join(membershipIDs, "\x00")
+		}
+		requestHash = sha256.Sum256([]byte("teamseatwatch:remove:manual:v1\x00" + batchID + "\x00" + scope))
+	}
 	var priorLimit int
 	priorErr := tx.QueryRow(r.Context(), `SELECT task_concurrency FROM tsw_operations WHERE owner_id=$1 AND operation_type='remove' AND idempotency_key=$2`, owner.OwnerID, request.IdempotencyKey).Scan(&priorLimit)
 	if priorErr == nil && priorLimit != selectedConcurrency(request.Concurrency) {
@@ -300,6 +377,18 @@ func (h *OwnerAuthHandler) createRemovalOperation(w http.ResponseWriter, r *http
 	if !preview.CanProceed {
 		h.rejectOwnerMutation(w, r, owner, "remove.create", "remove_not_ready", http.StatusConflict, "remove_not_ready", "Removal Not Ready", "Current batch, Workspace, Owner, or member facts are not sufficient")
 		return
+	}
+	if manual {
+		if len(membershipIDs) == 0 {
+			h.rejectOwnerMutation(w, r, owner, "remove.create", "remove_not_ready", http.StatusConflict, "remove_not_ready", "Removal Not Ready", "The batch has no remaining members")
+			return
+		}
+		for _, membershipID := range membershipIDs {
+			if !activeMemberships[membershipID] {
+				h.rejectOwnerMutation(w, r, owner, "remove.create", "invalid_removal_memberships", http.StatusConflict, "invalid_removal_memberships", "Conflict", "Every selected account must be a remaining member of this batch")
+				return
+			}
+		}
 	}
 	membershipUUIDs := make([]uuid.UUID, 0, len(membershipIDs))
 	for _, membershipID := range membershipIDs {

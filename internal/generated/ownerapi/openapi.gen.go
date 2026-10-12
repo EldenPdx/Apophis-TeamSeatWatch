@@ -4725,6 +4725,12 @@ type RemoveRequest struct {
 	Concurrency    *int                 `json:"concurrency,omitempty"`
 	Confirm        RemoveRequestConfirm `json:"confirm"`
 	IdempotencyKey string               `json:"idempotencyKey"`
+
+	// Manual Explicit Owner removal before the planned time
+	Manual *bool `json:"manual,omitempty"`
+
+	// MembershipIds Manual removal scope; omit to remove all remaining batch members
+	MembershipIds *[]openapi_types.UUID `json:"membershipIds,omitempty"`
 }
 
 // RemoveRequestConfirm defines model for RemoveRequest.Confirm.
@@ -5606,6 +5612,9 @@ type GetRemovalOperationParams struct {
 type GetBatchRemovalPreviewParams struct {
 	TargetPage     *TargetPage     `form:"target_page,omitempty" json:"target_page,omitempty"`
 	TargetPageSize *TargetPageSize `form:"target_page_size,omitempty" json:"target_page_size,omitempty"`
+
+	// Manual Allow explicit Owner removal before the planned time
+	Manual *bool `form:"manual,omitempty" json:"manual,omitempty"`
 }
 
 // CreateRemovalReconciliationParams defines parameters for CreateRemovalReconciliation.
@@ -8074,6 +8083,19 @@ func (siw *ServerInterfaceWrapper) GetBatchRemovalPreview(w http.ResponseWriter,
 			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "target_page_size"})
 		} else {
 			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "target_page_size", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "manual" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "manual", r.URL.Query(), &params.Manual, runtime.BindQueryParameterOptions{Type: "boolean", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "manual"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "manual", Err: err})
 		}
 		return
 	}

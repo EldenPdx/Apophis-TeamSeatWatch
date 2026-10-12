@@ -3054,6 +3054,10 @@ export interface components {
         };
         RemoveRequest: {
             concurrency?: number;
+            /** @description Explicit Owner removal before the planned time */
+            manual?: boolean;
+            /** @description Manual removal scope; omit to remove all remaining batch members */
+            membershipIds?: string[];
             idempotencyKey: string;
             /** @constant */
             confirm: true;
@@ -6396,6 +6400,8 @@ export interface operations {
             query?: {
                 target_page?: components["parameters"]["TargetPage"];
                 target_page_size?: components["parameters"]["TargetPageSize"];
+                /** @description Allow explicit Owner removal before the planned time */
+                manual?: boolean;
             };
             header?: never;
             path: {

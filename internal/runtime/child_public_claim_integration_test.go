@@ -72,6 +72,10 @@ func TestPublicFirstClaimWaitsForMaterialRepairButOriginalRestoreAndDownloadSurv
 		t.Fatalf("claim after repair=%d %s", claimed.Code, claimed.Body.String())
 	}
 	cookie := claimed.Result().Cookies()[0]
+	original := publicRedeemRequest(t, handler, http.MethodPost, "/api/public/v1/redeem/download", nil, cookie)
+	if original.Code != http.StatusOK || !bytes.Contains(accountCardZIPPayload(t, original), []byte("original-refresh")) {
+		t.Fatalf("original account delivery=%d", original.Code)
+	}
 	if _, err = pool.Exec(ctx, `UPDATE tsw_target_credentials SET material_status='needs_totp',version=version+1 WHERE target_account_id=(SELECT target_account_id FROM tsw_batch_memberships WHERE id=$1)`, membershipID); err != nil {
 		t.Fatal(err)
 	}
@@ -81,8 +85,8 @@ func TestPublicFirstClaimWaitsForMaterialRepairButOriginalRestoreAndDownloadSurv
 	}
 	for _, accessCookie := range []*http.Cookie{cookie, restored.Result().Cookies()[0]} {
 		downloaded := publicRedeemRequest(t, handler, http.MethodPost, "/api/public/v1/redeem/download", nil, accessCookie)
-		if downloaded.Code != 200 || string(accountCardZIPPayload(t, downloaded)) != "{}" {
-			t.Fatalf("immutable download after 2FA changed=%d %s", downloaded.Code, downloaded.Body.String())
+		if downloaded.Code != http.StatusOK || !bytes.Equal(downloaded.Body.Bytes(), original.Body.Bytes()) {
+			t.Fatalf("immutable download after 2FA changed=%d", downloaded.Code)
 		}
 	}
 }

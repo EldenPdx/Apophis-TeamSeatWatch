@@ -25,6 +25,7 @@ type RemovalTarget struct {
 	OperationID                   string
 	BatchID                       string
 	WorkspaceID                   string
+	MotherID                      string
 	MembershipID                  string
 	TargetAccountID               string
 	TargetIdentifier              string
@@ -80,6 +81,7 @@ func (s *Store) RemovalTarget(ctx context.Context, item Task) (RemovalTarget, er
 		return RemovalTarget{}, err
 	}
 	target.OwnerPassword = string(plaintext)
+	target.MotherID = motherID.String()
 	clear(plaintext)
 	rows, err := s.pool.Query(ctx, `SELECT operation_target.membership_id,membership_target.identifier,operation_target.ordinal
 		FROM tsw_operation_targets operation_target
@@ -228,6 +230,10 @@ func (s *Store) FinishRemovalConfirmed(ctx context.Context, item Task, target Re
 		return err
 	}
 	defer tx.Rollback(ctx)
+	// Match delivery publication's account-before-row lock order.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('tsw.rotation.action.target_account/'||target_account_id::text,0)) FROM tsw_batch_memberships WHERE id=$1`, target.MembershipID); err != nil {
+		return err
+	}
 	if err := lockRemovalTask(ctx, tx, item); err != nil {
 		return err
 	}
@@ -250,6 +256,10 @@ func (s *Store) FinishRemovalConfirmed(ctx context.Context, item Task, target Re
 		return err
 	}
 	if err = settleRemovalTask(ctx, tx, item, "succeeded", false); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `UPDATE tsw_tasks SET status='interrupted',lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,finished_at=now(),updated_at=now(),version=version+1
+		WHERE operation_target_id=$1 AND id<>$2 AND task_type IN ('remove','remove_reconcile') AND status IN ('queued','running','retry_wait')`, item.OperationTargetID, item.ID); err != nil {
 		return err
 	}
 	if _, err = audit.Write(ctx, tx, audit.Event{Type: audit.RemoveTargetConfirmed, Actor: audit.ActorSystem, RetentionScopeID: item.WorkspaceID, EntityType: "operation_target", EntityID: item.OperationTargetID, Outcome: audit.OutcomeSucceeded, CorrelationID: item.CorrelationID, Details: audit.RemovalTargetDetails{Status: "succeeded", Result: "remove_confirmed", Stage: stage, AttemptNo: item.AttemptNo}, IdempotencyKey: item.ID + ":remove.confirmed"}); err != nil {
@@ -292,16 +302,19 @@ func (s *Store) FinishRemovalReconciliation(ctx context.Context, item Task, targ
 			return err
 		}
 	}
-	if _, err = tx.Exec(ctx, `UPDATE tsw_operation_targets SET status='queued',outcome_code='remove_retry_scheduled',diagnostic_code='reconciled_present',platform_request_may_have_reached=false,platform_request_stage=NULL,platform_request_started_at=NULL,completed_at=NULL,updated_at=now(),version=version+1 WHERE id=$1`, item.OperationTargetID); err != nil {
+	exhausted := target.RemoveAttemptCount >= maximumRemovalSideEffects
+	if _, err = tx.Exec(ctx, `UPDATE tsw_operation_targets SET status=CASE WHEN $2 THEN 'blocked' ELSE 'queued' END,outcome_code=CASE WHEN $2 THEN 'remove_blocked' ELSE 'remove_retry_scheduled' END,diagnostic_code=CASE WHEN $2 THEN 'remove_attempts_exhausted' ELSE 'reconciled_present' END,platform_request_may_have_reached=false,platform_request_stage=NULL,platform_request_started_at=NULL,completed_at=CASE WHEN $2 THEN now() ELSE NULL END,updated_at=now(),version=version+1 WHERE id=$1`, item.OperationTargetID, exhausted); err != nil {
 		return err
 	}
 	if item.TaskType == "remove_reconcile" {
-		if target.RemoveAttemptCount < maximumRemovalSideEffects {
+		if !exhausted {
 			_, err = tx.Exec(ctx, `INSERT INTO tsw_tasks(operation_target_id,membership_id,workspace_id,parent_task_id,task_type,dedupe_key,input_snapshot,correlation_id,max_attempts) VALUES ($1,$2,$3,$4,'remove',$5,jsonb_build_object('operation_target_id',$1::text,'membership_id',$2::text,'workspace_id',$3::text),$6,6) ON CONFLICT (task_type,dedupe_key) DO NOTHING`, item.OperationTargetID, target.MembershipID, target.WorkspaceID, item.ID, "remove-resume:"+item.OperationTargetID+":"+item.ID, item.CorrelationID)
 		}
 		if err == nil {
 			err = settleRemovalTask(ctx, tx, item, "succeeded", false)
 		}
+	} else if exhausted {
+		err = settleRemovalTask(ctx, tx, item, "failed", false)
 	} else {
 		err = settleRemovalTask(ctx, tx, item, "retry_wait", true)
 	}
@@ -314,7 +327,11 @@ func (s *Store) FinishRemovalReconciliation(ctx context.Context, item Task, targ
 	if err = releaseRemovalOperationLease(ctx, tx, target.OperationID, item); err != nil {
 		return err
 	}
-	_, err = audit.Write(ctx, tx, audit.Event{Type: audit.RemoveReconciliationDone, Actor: audit.ActorSystem, RetentionScopeID: item.WorkspaceID, EntityType: "task", EntityID: item.ID, Outcome: audit.OutcomeFailed, CorrelationID: item.CorrelationID, Details: audit.RemovalTargetDetails{Status: "queued", Result: "reconciled_present", Stage: "reconciliation", AttemptNo: item.AttemptNo}, IdempotencyKey: item.ID + ":remove.reconciled:" + strconv.Itoa(item.AttemptNo)})
+	status, diagnostic := "queued", "reconciled_present"
+	if exhausted {
+		status, diagnostic = "blocked", "remove_attempts_exhausted"
+	}
+	_, err = audit.Write(ctx, tx, audit.Event{Type: audit.RemoveReconciliationDone, Actor: audit.ActorSystem, RetentionScopeID: item.WorkspaceID, EntityType: "task", EntityID: item.ID, Outcome: audit.OutcomeFailed, CorrelationID: item.CorrelationID, Details: audit.RemovalTargetDetails{Status: status, Result: diagnostic, Stage: "reconciliation", AttemptNo: item.AttemptNo}, IdempotencyKey: item.ID + ":remove.reconciled:" + strconv.Itoa(item.AttemptNo)})
 	if err != nil {
 		return err
 	}
@@ -397,23 +414,23 @@ func settleRemovalAggregate(ctx context.Context, tx pgx.Tx, operationID, batchID
 		return false, err
 	}
 	var ended bool
-	err = tx.QueryRow(ctx, `UPDATE tsw_batches SET status=CASE WHEN $2='succeeded' AND NOT EXISTS (SELECT 1 FROM tsw_batch_memberships WHERE batch_id=$1 AND state<>'removed') THEN 'ended' ELSE 'removing' END,
+	err = tx.QueryRow(ctx, `UPDATE tsw_batches SET status=CASE WHEN $2='succeeded' THEN CASE WHEN NOT EXISTS (SELECT 1 FROM tsw_batch_memberships WHERE batch_id=$1 AND state<>'removed') THEN 'ended' ELSE 'serving' END ELSE 'removing' END,
 		service_ended_at=CASE WHEN $2='succeeded' AND NOT EXISTS (SELECT 1 FROM tsw_batch_memberships WHERE batch_id=$1 AND state<>'removed') THEN COALESCE(service_ended_at,now()) ELSE service_ended_at END,
 		blocking_reason=CASE WHEN $2='blocked' THEN 'remove_target_unresolved' ELSE NULL END,updated_at=now(),version=version+1
 		WHERE id=$1 RETURNING status='ended'`, batchID, operationStatus).Scan(&ended)
-	if err != nil || !ended {
+	if err != nil {
 		return ended, err
 	}
 	if _, err = tx.Exec(ctx, `UPDATE tsw_oauth_attempts attempt SET state='superseded',outcome_code='service_ended',finished_at=now()
 		FROM tsw_tasks task,tsw_batch_memberships membership
-		WHERE attempt.task_id=task.id AND task.membership_id=membership.id AND membership.batch_id=$1 AND attempt.state='running'`, batchID); err != nil {
+		WHERE attempt.task_id=task.id AND task.membership_id=membership.id AND membership.batch_id=$1 AND membership.state='removed' AND attempt.state='running'`, batchID); err != nil {
 		return false, err
 	}
 	_, err = tx.Exec(ctx, `UPDATE tsw_tasks task SET status='interrupted',lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,finished_at=now(),updated_at=now(),version=task.version+1
 		FROM tsw_batch_memberships membership
-		WHERE task.membership_id=membership.id AND membership.batch_id=$1
+		WHERE task.membership_id=membership.id AND membership.batch_id=$1 AND membership.state='removed'
 		AND task.task_type IN ('oauth_generate','oauth_probe','oauth_reclaim') AND task.status IN ('queued','running','retry_wait')`, batchID)
-	return true, err
+	return ended, err
 }
 
 func (s *Store) EnqueueRemovalReconciliation(ctx context.Context, batchID, idempotencyKey, correlationID string) (int64, error) {
@@ -422,9 +439,20 @@ func (s *Store) EnqueueRemovalReconciliation(ctx context.Context, batchID, idemp
 		return 0, err
 	}
 	defer tx.Rollback(ctx)
-	var operationID string
-	if err = tx.QueryRow(ctx, `SELECT id FROM tsw_operations WHERE batch_id=$1 AND operation_type='remove' AND status='blocked' ORDER BY created_at DESC LIMIT 1 FOR UPDATE`, batchID).Scan(&operationID); err != nil {
+	var operationID, operationStatus string
+	if err = tx.QueryRow(ctx, `SELECT id,status FROM tsw_operations WHERE batch_id=$1 AND operation_type='remove' ORDER BY created_at DESC,id DESC LIMIT 1 FOR UPDATE`, batchID).Scan(&operationID, &operationStatus); err != nil {
 		return 0, err
+	}
+	var replayed int64
+	if err = tx.QueryRow(ctx, `SELECT count(*) FROM tsw_tasks task JOIN tsw_operation_targets target ON target.id=task.operation_target_id
+		WHERE target.operation_id=$1 AND task.task_type='remove_reconcile' AND task.dedupe_key='remove-reconcile:'||target.id::text||':'||$2`, operationID, idempotencyKey).Scan(&replayed); err != nil {
+		return 0, err
+	}
+	if replayed > 0 {
+		return replayed, tx.Commit(ctx)
+	}
+	if operationStatus != "blocked" {
+		return 0, pgx.ErrNoRows
 	}
 	result, err := tx.Exec(ctx, `INSERT INTO tsw_tasks(operation_target_id,membership_id,workspace_id,task_type,dedupe_key,input_snapshot,correlation_id,max_attempts)
 		SELECT target_result.id,target_result.membership_id,operation.workspace_id,'remove_reconcile',
@@ -433,12 +461,17 @@ func (s *Store) EnqueueRemovalReconciliation(ctx context.Context, batchID, idemp
 		FROM tsw_operation_targets target_result
 		JOIN tsw_operations operation ON operation.id=target_result.operation_id
 		WHERE target_result.operation_id=$1 AND target_result.status IN ('blocked','unknown')
+		AND NOT EXISTS (SELECT 1 FROM tsw_tasks pending JOIN tsw_operation_targets pending_target ON pending_target.id=pending.operation_target_id
+			WHERE pending_target.operation_id=$1 AND pending.task_type='remove_reconcile' AND pending.status IN ('queued','running','retry_wait'))
 		ON CONFLICT (task_type,dedupe_key) DO NOTHING`, operationID, idempotencyKey, correlationID)
 	if err != nil {
 		return 0, err
 	}
 	if result.RowsAffected() == 0 {
 		return 0, pgx.ErrNoRows
+	}
+	if _, err = tx.Exec(ctx, `UPDATE tsw_operations SET status='queued',completed_at=NULL,updated_at=now(),version=version+1 WHERE id=$1`, operationID); err != nil {
+		return 0, err
 	}
 	return result.RowsAffected(), tx.Commit(ctx)
 }

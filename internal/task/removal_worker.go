@@ -17,7 +17,7 @@ func (w *Worker) runRemoval(ctx context.Context, item Task, lease *egress.Lease)
 	if w.Remover == nil || w.Facts == nil {
 		return w.finishRemovalBlocked(ctx, item, target, nil, "platform_configuration_invalid", "prepare")
 	}
-	remover, err := w.Remover(lease.Client(), platform.Credentials{LoginIdentifier: target.OwnerIdentifier, Password: target.OwnerPassword})
+	remover, err := w.Remover(ctx, lease.Client(), target)
 	if err != nil {
 		return w.finishRemovalBlocked(ctx, item, target, nil, "platform_configuration_invalid", "prepare")
 	}

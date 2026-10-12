@@ -1,0 +1,111 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.21.0
+      - name: Install dependencies and verification tools
+        run: |
+          corepack enable
+          corepack prepare pnpm@12.4.2 --activate
+          pnpm --dir web install --frozen-lockfile
+          go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.8.0
+          CGO_ENABLED=0 go install github.com/sqlc-dev/sqlc/cmd/sqlc@v1.31.1
+          go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+          # This staticcheck release needs the Go 1.27 export-format reader.
+          task_tool_dir=$(mktemp -d)
+          cd "$task_tool_dir"
+          go mod init staticcheck-tools
+          go get honnef.co/go/tools/cmd/staticcheck@v0.8.1 golang.org/x/tools@v0.52.0
+          go install honnef.co/go/tools/cmd/staticcheck
+      - name: Contracts, Go tests and checks
+        run: |
+          node tools/generate.mjs --check
+          go test -race -count=1 ./...
+          go vet ./...
+          node tools/run-staticcheck.mjs
+          govulncheck ./...
+          node tools/check-licenses.mjs
+      - name: Frontend tests and build
+        run: |
+          pnpm --dir web peers check
+          pnpm --dir web lint
+          pnpm --dir web typecheck
+          pnpm --dir web build
+          pnpm --dir web test
+          node --test $(rg --files web/tools -g '*.test.mjs' -g '!*-browser.test.mjs')
+      - name: Manual rotation browser regression
+        run: |
+          npm install --prefix "$RUNNER_TEMP/rotation-browser" --no-package-lock --no-audit --no-fund playwright@1.62.1
+          "$RUNNER_TEMP/rotation-browser/node_modules/.bin/playwright" install --with-deps chromium
+          mkdir -p "$RUNNER_TEMP/rotation-site/owner"
+          cp -R web/dist/owner/. "$RUNNER_TEMP/rotation-site/owner/"
+          python3 -m http.server 5194 --bind 127.0.0.1 --directory "$RUNNER_TEMP/rotation-site" > "$RUNNER_TEMP/rotation-server.log" 2>&1 &
+          task_server_pid=$!
+          trap 'kill "$task_server_pid"' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:5194/owner/ > /dev/null; then break; fi
+            sleep 1
+          done
+          export TSW_PLAYWRIGHT_MODULE="$RUNNER_TEMP/rotation-browser/node_modules/playwright/index.mjs"
+          export TSW_CHROMIUM_PATH
+          TSW_CHROMIUM_PATH=$(node -e 'const p=require(process.env.TSW_PLAYWRIGHT_MODULE.replace("index.mjs","index.js"));process.stdout.write(p.chromium.executablePath())')
+          node --test web/tools/rotation-removal-browser.test.mjs
+
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 55411:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.21.0
+      - name: Create disposable fixture databases
+        run: |
+          for database in tsw_ticket16_worker tsw_proxy_verify_clear_runtime tsw_redemptions_test tsw_proxy_verify_clear_task tsw_clear_migrations tsw_clear_mother tsw_clear_ledger tsw_clear_fence tsw_clear_workspace; do
+            createdb --host=127.0.0.1 --port=55411 --username=postgres "$database"
+          done
+      - name: Database integration and race tests
+        run: node tools/run-integration.mjs --race
+
+  container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.21.0
+      - name: Container build and configuration smoke test
+        run: node tools/verify-oci.mjs

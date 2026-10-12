@@ -156,7 +156,7 @@ func newRemovalWorker(t *testing.T, pool *pgxpool.Pool, adapter *removalScenario
 	return &Worker{
 		Store: NewStore(pool, removalIntegrationKeyRing{}), Facts: workspace.NewService(pool, removalIntegrationKeyRing{}), Egress: leases,
 		ID: "remove-integration", LeaseTime: time.Minute,
-		Remover: func(*http.Client, platform.Credentials) (platform.Remover, error) { return adapter, nil },
+		Remover: func(context.Context, *http.Client, RemovalTarget) (platform.Remover, error) { return adapter, nil },
 	}
 }
 
@@ -227,7 +227,7 @@ func TestRemovalIntegrationRequiredEgressAdmissionBlocksMutation(t *testing.T) {
 	worker := &Worker{
 		Store: NewStore(pool, removalIntegrationKeyRing{}), Facts: workspace.NewService(pool, removalIntegrationKeyRing{}), Egress: leases,
 		ID: "remove-required-egress", LeaseTime: time.Minute,
-		Remover: func(*http.Client, platform.Credentials) (platform.Remover, error) { return adapter, nil },
+		Remover: func(context.Context, *http.Client, RemovalTarget) (platform.Remover, error) { return adapter, nil },
 	}
 	if worked, err := worker.RunOnce(ctx); !worked || !errors.Is(err, ErrAttemptFailed) {
 		t.Fatalf("required egress admission worked=%v err=%v", worked, err)
@@ -269,6 +269,246 @@ func TestRemovalIntegrationDoesNotEndBatchAfterPartialOutcome(t *testing.T) {
 	}
 	if len(adapter.deleted) != 2 || adapter.deleted[0] != "live-one" || adapter.deleted[1] != "live-two" {
 		t.Fatalf("DELETE targets=%v", adapter.deleted)
+	}
+}
+
+func TestRemovalIntegrationSingleRemovalKeepsOtherAccountsRunnable(t *testing.T) {
+	pool, ctx := newRemovalIntegrationPool(t)
+	graph := seedRemovalGraph(t, ctx, pool)
+	if _, err := pool.Exec(ctx, `DELETE FROM tsw_tasks WHERE membership_id=$1 AND task_type='remove'`, graph.membershipTwo); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `DELETE FROM tsw_operation_targets WHERE operation_id=$1 AND membership_id=$2`, graph.operation, graph.membershipTwo); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE tsw_batches SET login_started_at=now(),planned_at=now()+interval '1 day' WHERE id=$1`, graph.batch); err != nil {
+		t.Fatal(err)
+	}
+	assetID, taskID := uuid.NewString(), uuid.NewString()
+	if _, err := pool.Exec(ctx, `INSERT INTO tsw_oauth_assets(id,membership_id) VALUES ($1,$2)`, assetID, graph.membershipTwo); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO tsw_tasks(id,membership_id,oauth_asset_id,workspace_id,task_type,dedupe_key,input_snapshot,correlation_id,max_attempts)
+		VALUES ($1,$2,$3,$4,'oauth_generate','remaining-login','{}','remaining-login',3)`, taskID, graph.membershipTwo, assetID, graph.workspace); err != nil {
+		t.Fatal(err)
+	}
+	owner, one, two := removalTestMembers()
+	worker := newRemovalWorker(t, pool, &removalScenarioAdapter{
+		snapshots: []platform.ExactMemberSnapshot{exactRemovalSnapshot(owner, one, two), exactRemovalSnapshot(owner, two)},
+		removals:  []platform.RemoveMemberResult{{HTTPStatus: 200, Accepted: true, RequestMayHaveEffect: true}},
+	})
+	if worked, err := worker.RunOnce(ctx); !worked || err != nil {
+		t.Fatalf("single removal worked=%v err=%v", worked, err)
+	}
+	claimed, err := worker.Store.ClaimDelivery(ctx, "remaining-login", time.Minute, "oauth_generate", AttemptRoute{Mode: "direct"})
+	if err != nil || claimed.ID != taskID || claimed.MembershipID != graph.membershipTwo {
+		t.Fatalf("remaining account cannot continue login: task=%+v err=%v", claimed, err)
+	}
+}
+
+func TestRemovalIntegrationSingleRemovalInterruptsOnlyRemovedAccountDelivery(t *testing.T) {
+	pool, ctx := newRemovalIntegrationPool(t)
+	graph := seedRemovalGraph(t, ctx, pool)
+	if _, err := pool.Exec(ctx, `DELETE FROM tsw_tasks WHERE membership_id=$1 AND task_type='remove'`, graph.membershipTwo); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `DELETE FROM tsw_operation_targets WHERE operation_id=$1 AND membership_id=$2`, graph.operation, graph.membershipTwo); err != nil {
+		t.Fatal(err)
+	}
+	assetID, remainingAssetID := uuid.NewString(), uuid.NewString()
+	if _, err := pool.Exec(ctx, `INSERT INTO tsw_oauth_assets(id,membership_id) VALUES ($1,$2),($3,$4)`, assetID, graph.membershipOne, remainingAssetID, graph.membershipTwo); err != nil {
+		t.Fatal(err)
+	}
+	generateID, probeID, reclaimID, remainingID := uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString()
+	reclaimLease := uuid.New()
+	if _, err := pool.Exec(ctx, `INSERT INTO tsw_tasks(id,membership_id,oauth_asset_id,workspace_id,task_type,dedupe_key,input_snapshot,correlation_id,status,lease_owner,lease_token,lease_expires_at,attempt_count,max_attempts)
+		VALUES ($1,$5,$6,$7,'oauth_generate','removed-generate','{}','removed-delivery','queued',NULL,NULL,NULL,0,3),
+		($2,$5,$6,$7,'oauth_probe','removed-probe','{}','removed-delivery','retry_wait',NULL,NULL,NULL,1,3),
+		($3,$5,$6,$7,'oauth_reclaim','removed-reclaim','{}','removed-delivery','running','old-worker',$8,now()+interval '10 minutes',1,3),
+		($4,$9,$10,$7,'oauth_probe','remaining-probe','{}','remaining-delivery','queued',NULL,NULL,NULL,0,3)`,
+		generateID, probeID, reclaimID, remainingID, graph.membershipOne, assetID, graph.workspace, reclaimLease, graph.membershipTwo, remainingAssetID); err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(pool, removalIntegrationKeyRing{})
+	reclaim := Task{ID: reclaimID, TaskType: "oauth_reclaim", WorkspaceID: graph.workspace, MembershipID: graph.membershipOne, OAuthAssetID: assetID, LeaseToken: reclaimLease, AttemptNo: 1, CorrelationID: "removed-delivery"}
+	attempt, err := store.BeginDeliveryAttempt(ctx, reclaim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, one, two := removalTestMembers()
+	worker := newRemovalWorker(t, pool, &removalScenarioAdapter{
+		snapshots: []platform.ExactMemberSnapshot{exactRemovalSnapshot(owner, one, two), exactRemovalSnapshot(owner, two)},
+		removals:  []platform.RemoveMemberResult{{HTTPStatus: 200, Accepted: true, RequestMayHaveEffect: true}},
+	})
+	if worked, err := worker.RunOnce(ctx); !worked || err != nil {
+		t.Fatalf("single removal worked=%v err=%v", worked, err)
+	}
+	for _, taskID := range []string{generateID, probeID, reclaimID} {
+		item, err := store.Get(ctx, taskID)
+		if err != nil || item.Status != "interrupted" || item.FinishedAt == nil {
+			t.Fatalf("removed account delivery is still runnable: task=%+v err=%v", item, err)
+		}
+	}
+	remaining, err := store.Get(ctx, remainingID)
+	if err != nil || remaining.Status != "queued" || remaining.FinishedAt != nil {
+		t.Fatalf("remaining account delivery was interrupted: task=%+v err=%v", remaining, err)
+	}
+	if err := store.FinishDeliveryReclaim(ctx, reclaim, attempt, DeliveryReclaimTarget{}, platform.DeliveryCredentialSet{}, platform.DeliveryLiveness{}, "refresh", false, false); !errors.Is(err, ErrLeaseLost) {
+		t.Fatalf("removed account accepted stale delivery publication: %v", err)
+	}
+}
+
+func TestRemovalIntegrationConcurrentDeliveryPublicationCannotBlockConfirmedRemoval(t *testing.T) {
+	pool, ctx := newRemovalIntegrationPool(t)
+	graph := seedRemovalGraph(t, ctx, pool)
+	if _, err := pool.Exec(ctx, `DELETE FROM tsw_tasks WHERE membership_id=$1 AND task_type='remove'`, graph.membershipTwo); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `DELETE FROM tsw_operation_targets WHERE operation_id=$1 AND membership_id=$2`, graph.operation, graph.membershipTwo); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE tsw_batches SET status='serving',login_started_at=now() WHERE id=$1`, graph.batch); err != nil {
+		t.Fatal(err)
+	}
+	assetID, taskID := uuid.NewString(), uuid.NewString()
+	lease := uuid.New()
+	if _, err := pool.Exec(ctx, `INSERT INTO tsw_oauth_assets(id,membership_id) VALUES ($1,$2)`, assetID, graph.membershipOne); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO tsw_tasks(id,membership_id,oauth_asset_id,workspace_id,task_type,dedupe_key,input_snapshot,correlation_id,status,lease_owner,lease_token,lease_expires_at,attempt_count,max_attempts)
+		VALUES ($1,$2,$3,$4,'oauth_generate','concurrent-publish','{}','concurrent-publish','running','old-worker',$5,now()+interval '10 minutes',1,3)`, taskID, graph.membershipOne, assetID, graph.workspace, lease); err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(pool, removalIntegrationKeyRing{})
+	item := Task{ID: taskID, TaskType: "oauth_generate", WorkspaceID: graph.workspace, MembershipID: graph.membershipOne, OAuthAssetID: assetID, LeaseToken: lease, AttemptNo: 1, CorrelationID: "concurrent-publish"}
+	attempt, err := store.BeginDeliveryAttempt(ctx, item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE tsw_batches SET status='removing' WHERE id=$1`, graph.batch); err != nil {
+		t.Fatal(err)
+	}
+	guard, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer guard.Rollback(ctx)
+	if _, err := guard.Exec(ctx, `SELECT id FROM tsw_batch_memberships WHERE id=$1 FOR UPDATE`, graph.membershipOne); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	waitForBlocked := func(want int) {
+		t.Helper()
+		for {
+			var blocked int
+			if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND wait_event_type='Lock'`).Scan(&blocked); err != nil {
+				t.Fatal(err)
+			}
+			if blocked >= want {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	owner, one, two := removalTestMembers()
+	worker := newRemovalWorker(t, pool, &removalScenarioAdapter{
+		snapshots: []platform.ExactMemberSnapshot{exactRemovalSnapshot(owner, one, two), exactRemovalSnapshot(owner, two)},
+		removals:  []platform.RemoveMemberResult{{HTTPStatus: 200, Accepted: true, RequestMayHaveEffect: true}},
+	})
+	removed := make(chan error, 1)
+	go func() {
+		worked, err := worker.RunOnce(ctx)
+		if !worked && err == nil {
+			err = errors.New("removal was not processed")
+		}
+		removed <- err
+	}()
+	waitForBlocked(1)
+	published := make(chan error, 1)
+	go func() {
+		published <- store.FinishDeliveryAttempt(ctx, item, attempt,
+			DeliveryTarget{WorkspaceID: graph.workspace, PlatformWorkspace: "workspace-platform", PlatformSubjectID: "subject-one"},
+			platform.DeliveryCredentialSet{RefreshToken: "refresh", AccessToken: "access", IDToken: "id", PlatformSubjectID: "subject-one", WorkspaceID: "workspace-platform"},
+			platform.DeliveryLiveness{Status: "ok", HTTPStatus: 200, WorkspaceID: "workspace-platform", PlatformSubjectID: "subject-one", ObservedAt: time.Now().UTC()})
+	}()
+	waitForBlocked(2)
+	if err := guard.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-removed; err != nil {
+		t.Fatalf("concurrent publication blocked removal: %v", err)
+	}
+	if err := <-published; !errors.Is(err, ErrLeaseLost) {
+		t.Fatalf("removed account accepted concurrent publication: %v", err)
+	}
+}
+
+func TestRemovalIntegrationConfirmedReconciliationInterruptsRedundantTasks(t *testing.T) {
+	pool, ctx := newRemovalIntegrationPool(t)
+	graph := seedRemovalGraph(t, ctx, pool)
+	if _, err := pool.Exec(ctx, `DELETE FROM tsw_tasks WHERE membership_id=$1 AND task_type='remove'`, graph.membershipTwo); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `DELETE FROM tsw_operation_targets WHERE operation_id=$1 AND membership_id=$2`, graph.operation, graph.membershipTwo); err != nil {
+		t.Fatal(err)
+	}
+	owner, one, two := removalTestMembers()
+	adapter := &removalScenarioAdapter{
+		snapshots: []platform.ExactMemberSnapshot{exactRemovalSnapshot(owner, one, two)},
+		removals:  []platform.RemoveMemberResult{{RequestMayHaveEffect: true, Retryable: true}},
+		removeErr: []error{errors.New("response lost")},
+	}
+	worker := newRemovalWorker(t, pool, adapter)
+	if worked, err := worker.RunOnce(ctx); !worked || !errors.Is(err, ErrAttemptFailed) {
+		t.Fatalf("uncertain removal worked=%v err=%v", worked, err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE tsw_tasks SET available_at=now()+interval '1 hour' WHERE task_type='remove' AND membership_id=$1`, graph.membershipOne); err != nil {
+		t.Fatal(err)
+	}
+	if queued, err := worker.Store.EnqueueRemovalReconciliation(ctx, graph.batch, "first-reconcile", "first-reconcile"); err != nil || queued != 1 {
+		t.Fatalf("queue reconciliation count=%d err=%v", queued, err)
+	}
+	// Historical requests could queue another reconciliation for the same target.
+	if _, err := pool.Exec(ctx, `INSERT INTO tsw_tasks(operation_target_id,membership_id,workspace_id,task_type,dedupe_key,input_snapshot,correlation_id,max_attempts)
+		SELECT operation_target_id,membership_id,workspace_id,task_type,'second-reconcile',input_snapshot,'second-reconcile',max_attempts FROM tsw_tasks WHERE task_type='remove_reconcile' AND membership_id=$1`, graph.membershipOne); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := pool.Query(ctx, `SELECT id FROM tsw_tasks WHERE membership_id=$1 ORDER BY created_at,id`, graph.membershipOne)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var taskIDs []string
+	for rows.Next() {
+		var taskID string
+		if err := rows.Scan(&taskID); err != nil {
+			t.Fatal(err)
+		}
+		taskIDs = append(taskIDs, taskID)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	adapter.snapshots = []platform.ExactMemberSnapshot{exactRemovalSnapshot(owner, two)}
+	if worked, err := worker.RunOnce(ctx); !worked || err != nil {
+		t.Fatalf("confirmed reconciliation worked=%v err=%v", worked, err)
+	}
+	completed := 0
+	for _, taskID := range taskIDs {
+		item, err := worker.Store.Get(ctx, taskID)
+		if err != nil || item.FinishedAt == nil || item.Status != "interrupted" && item.Status != "succeeded" {
+			t.Fatalf("confirmed target has runnable redundant task: task=%+v err=%v", item, err)
+		}
+		if item.Status == "succeeded" {
+			completed++
+		}
+	}
+	if completed != 1 {
+		t.Fatalf("completed reconciliation count=%d want 1", completed)
+	}
+	if worked, err := worker.RunOnce(ctx); worked || err != nil {
+		t.Fatalf("confirmed target retried: worked=%v err=%v", worked, err)
 	}
 }
 

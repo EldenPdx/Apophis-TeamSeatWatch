@@ -14,7 +14,7 @@ import (
 	"github.com/pressly/goose/v3"
 )
 
-// Rehearse 24 -> 25 -> 26 -> 27 -> 28 while preserving a completed selection and preview.
+// Rehearse upgrading from 24 while preserving the ready selection and preview.
 func TestOperationSelectionUpgradeFrom24Integration(t *testing.T) {
 	dsn := os.Getenv("TSW_TEST_DATABASE_URL")
 	if dsn == "" {
@@ -82,15 +82,15 @@ func TestOperationSelectionUpgradeFrom24Integration(t *testing.T) {
 	if err := db.QueryRowContext(ctx, `INSERT INTO tsw_expiry_rotation_previews(owner_id,draft_id,draft_version,workspace_id,verification_id,facts,digest,status,expires_at) VALUES($1,$2,1,$3,$4,'{"source":"upgrade"}',repeat('a',64),'facts_incomplete',now()+interval '1 hour') RETURNING id`, owner, id, workspace, verification).Scan(&preview); err != nil {
 		t.Fatal(err)
 	}
-	if err := Apply(ctx, db); err != nil {
+	if _, err := provider.UpTo(ctx, 28); err != nil {
 		t.Fatal(err)
 	}
 	version, err = provider.GetDBVersion(ctx)
-	if err != nil || version != RequiredVersion {
+	if err != nil || version != 28 {
 		t.Fatalf("after upgrade: version=%d err=%v", version, err)
 	}
-	if err := Apply(ctx, db); err != nil {
-		t.Fatalf("second Apply: %v", err)
+	if _, err := provider.UpTo(ctx, 28); err != nil {
+		t.Fatalf("second upgrade: %v", err)
 	}
 	var count int
 	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='tsw_expiry_rotation_previews'`).Scan(&count); err != nil || count != 1 {
@@ -123,5 +123,18 @@ func TestOperationSelectionUpgradeFrom24Integration(t *testing.T) {
 	}
 	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM tsw_expiry_rotation_previews WHERE id=$1 AND draft_id=$2`, preview, id).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("28 downgrade/reapply lost frozen preview: count=%d err=%v", count, err)
+	}
+	if err := Apply(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	if err := Apply(ctx, db); err != nil {
+		t.Fatalf("second Apply: %v", err)
+	}
+	version, err = provider.GetDBVersion(ctx)
+	if err != nil || version != RequiredVersion {
+		t.Fatalf("latest upgrade: version=%d err=%v", version, err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM tsw_operation_selection_drafts WHERE id=$1 AND owner_id=$2 AND mother_account_id=$3 AND workspace_id=$4 AND batch_id=$5 AND destination_id=$6 AND step='ready'`, id, owner, mother, workspace, batch, destination).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("latest upgrade lost ready selection dependencies: count=%d err=%v", count, err)
 	}
 }

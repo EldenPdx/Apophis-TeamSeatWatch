@@ -104,7 +104,8 @@ var _ ownerapi.ServerInterface = (*OwnerAuthHandler)(nil)
 // OwnerControl exposes the HTTP routes and their shared scoped invitation factory.
 type OwnerControl struct {
 	http.Handler
-	Joiner task.JoinerFactory
+	Joiner  task.JoinerFactory
+	Remover task.RemoverFactory
 }
 
 // NewOwnerAuthHandler builds the Owner routes and their database pool.
@@ -196,7 +197,7 @@ func NewOwnerAuthHandler(config OwnerAuthConfig) (*OwnerControl, func(), error) 
 		w.Header().Set("Cache-Control", "no-store")
 		ownerHandler.ServeHTTP(w, r)
 	})
-	return &OwnerControl{Handler: noStore, Joiner: handler.operationJoiner}, func() {
+	return &OwnerControl{Handler: noStore, Joiner: handler.operationJoiner, Remover: handler.operationRemover}, func() {
 		cancelProxy()
 		<-proxyDone
 		pool.Close()

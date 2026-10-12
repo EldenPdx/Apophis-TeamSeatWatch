@@ -1,4 +1,4 @@
-$env:Path = "E:\TeamSeatWatchTools\bin;E:\TeamSeatWatchTools\go\1.27.1\go\bin;E:\TeamSeatWatchTools\gopath\bin;$env:Path"
+$env:Path = "E:\TeamSeatWatchTools\bin;E:\TeamSeatWatchTools\go\1.27.2\go\bin;E:\TeamSeatWatchTools\gopath\bin;$env:Path"
 $env:GOPATH = "E:\TeamSeatWatchTools\gopath"
 $env:GOMODCACHE = "E:\TeamSeatWatchTools\gomodcache"
 $env:GOCACHE = "E:\TeamSeatWatchTools\gocache"

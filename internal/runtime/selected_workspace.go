@@ -93,6 +93,22 @@ func (h *OwnerAuthHandler) VerifySelectedWorkspace(w http.ResponseWriter, r *htt
 	}
 	facts, readErr := reader.VerifySelectedWorkspace(ctx, attempt.access, request.MotherAccountId.String(), attempt.platformID)
 	cancel()
+	if _, err := h.recordSelectedWorkspaceFacts(r.Context(), workspaceID, request.MotherAccountId, attempt, facts, readErr); err != nil {
+		if errors.Is(err, errSelectedAttemptSuperseded) {
+			writeProblem(w, r, 409, "workspace_read_superseded", "Conflict", "A newer verification or access generation superseded this read", 0)
+		} else {
+			h.workspaceFailure(w, r, err)
+		}
+		return
+	}
+	response, err := h.selectedWorkspace(r.Context(), workspaceID, request.MotherAccountId)
+	if !h.selectedWorkspaceError(w, r, err) {
+		return
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+func (h *OwnerAuthHandler) recordSelectedWorkspaceFacts(ctx context.Context, workspaceID, motherID uuid.UUID, attempt selectedAttempt, facts platform.SelectedWorkspaceFacts, readErr error) (string, error) {
 	status, observedAt := "failed", time.Now().UTC()
 	var activeUntil *time.Time
 	var seats, members, invites *int
@@ -126,19 +142,7 @@ func (h *OwnerAuthHandler) VerifySelectedWorkspace(w http.ResponseWriter, r *htt
 	} else {
 		permission, completeness = "unknown", "unknown"
 	}
-	if err := h.finishSelectedWorkspace(r.Context(), workspaceID, request.MotherAccountId, attempt, status, permission, completeness, observedAt, activeUntil, seats, members, invites, facts); err != nil {
-		if errors.Is(err, errSelectedAttemptSuperseded) {
-			writeProblem(w, r, 409, "workspace_read_superseded", "Conflict", "A newer verification or access generation superseded this read", 0)
-		} else {
-			h.workspaceFailure(w, r, err)
-		}
-		return
-	}
-	response, err := h.selectedWorkspace(r.Context(), workspaceID, request.MotherAccountId)
-	if !h.selectedWorkspaceError(w, r, err) {
-		return
-	}
-	writeJSON(w, http.StatusOK, response)
+	return status, h.finishSelectedWorkspace(ctx, workspaceID, motherID, attempt, status, permission, completeness, observedAt, activeUntil, seats, members, invites, facts)
 }
 
 var errSelectedAttemptSuperseded = errors.New("selected workspace attempt superseded")

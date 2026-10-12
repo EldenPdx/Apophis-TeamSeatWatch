@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
 
-const image = 'golang@sha256:648f440f42a0958804efb24df176f806f9d353b41f1c0627f666428e40310f6b';
+const image = 'golang@sha256:5bc7f572bbaa98885a3a1fd9c0aa76b59e3e14e8628bfc316bbfd0c701e4818c';
 const root = resolve(process.cwd());
 const args = [
   'run', '--rm',

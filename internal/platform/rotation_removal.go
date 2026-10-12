@@ -15,7 +15,10 @@ import (
 // frozen remote member id supplied by the authorization; it never logs in, never
 // falls back to BasicAuth/self-leave, and never treats a transport receipt as an
 // absent-verified slot.
-type OfficialWorkspaceMemberRemover struct{ Client DiscoveryClient }
+type OfficialWorkspaceMemberRemover struct {
+	Client                   DiscoveryClient
+	ResolveMemberIdentifiers func(context.Context, []string) (map[string]string, error)
+}
 
 // WorkspaceMemberRemoval never confirms business vacancy. The runtime records
 // a separate current complete snapshot under the authorization and lease fence.
@@ -75,7 +78,7 @@ func (r OfficialWorkspaceMemberRemover) SnapshotWorkspaceMembers(ctx context.Con
 	// Saved browser cookies are not proof of that identity; do not mix them in.
 	access.Cookies = nil
 	facts := SelectedWorkspaceFacts{Result: Result{ObservedAt: time.Now().UTC(), Completeness: Unknown, Outcome: OutcomeIncomplete}}
-	members, ok := (selectedHTTPRead{client: client, access: access, workspaceID: workspaceID}).members(ctx, &facts)
+	members, ok := (selectedHTTPRead{client: client, access: access, workspaceID: workspaceID, resolveMemberIdentifiers: r.ResolveMemberIdentifiers}).members(ctx, &facts)
 	if !ok {
 		return ExactMemberSnapshot{}, errors.New("membership snapshot is not exact")
 	}
