@@ -36,8 +36,14 @@ func TestPersistentAccountEnvironmentBrowser(t *testing.T) {
 		t.Fatal("configured native fixture concurrency required")
 	}
 	fixture := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/cache-fixture.js" {
+			w.Header().Set("Content-Type", "text/javascript")
+			w.Header().Set("Cache-Control", "public, max-age=86400")
+			fmt.Fprint(w, "window.fixtureLoaded=true;/*"+strings.Repeat("cache-fixture", 10000)+"*/")
+			return
+		}
 		w.Header().Set("Content-Type", "text/html")
-		fmt.Fprint(w, "<!doctype html><title>Account environment fixture</title>")
+		fmt.Fprint(w, "<!doctype html><title>Account environment fixture</title><script src=\"https://cdn.oaistatic.com/cache-fixture.js\"></script>")
 	}))
 	defer fixture.Close()
 	sum := sha256.Sum256(fixture.Certificate().RawSubjectPublicKeyInfo)
@@ -119,11 +125,17 @@ func testAccountEnvironmentBrowser(t *testing.T, fixture *httptest.Server, e bro
 		t.Errorf("store: %v", err)
 		return
 	}
+	databaseScript := fmt.Sprintf(`(async()=>{const db=await new Promise((resolve,reject)=>{const r=indexedDB.open('profile-state',1);r.onupgradeneeded=()=>r.result.createObjectStore('identity');r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)});const previous=await new Promise((resolve,reject)=>{const r=db.transaction('identity').objectStore('identity').get('profile');r.onsuccess=()=>resolve(r.result||'');r.onerror=()=>reject(r.error)});await new Promise((resolve,reject)=>{const tx=db.transaction('identity','readwrite');tx.objectStore('identity').put(%q,'profile');tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error)});db.close();return previous})()`, profile)
+	previousDatabase, err := chromedp.Run(browser, chromedp.Evaluate[string](databaseScript, chromedp.EvalAwaitPromise))
+	if err != nil || previousDatabase != "" && previousDatabase != profile {
+		t.Errorf("IndexedDB inherited another identity or failed: %v", err)
+		return
+	}
 	path := filepath.Join(root, profile+"-observation.json")
 	stable := struct{ Canvas, UA, Timezone string }{observation.Canvas, observation.UA, observation.Timezone}
 	raw, _ := json.Marshal(stable)
 	if previous, err := os.ReadFile(path); err == nil {
-		if string(previous) != string(raw) || observation.Stored != profile || !strings.Contains(observation.Cookie, "profile="+profile) {
+		if string(previous) != string(raw) || observation.Stored != profile || !strings.Contains(observation.Cookie, "profile="+profile) || previousDatabase != profile {
 			t.Errorf("return changed fingerprint or failed to restore own cookie/storage: %s", profile)
 			return
 		}
@@ -163,6 +175,11 @@ func testAccountEnvironmentBrowser(t *testing.T, fixture *httptest.Server, e bro
 		return
 	}
 	closeBrowser()
+	for _, name := range []string{"Default/Cache", "Default/Code Cache", "GPUPersistentCache", "Default/GPUCache", "Default/DawnWebGPUCache", "Default/DawnGraphiteCache"} {
+		if _, err = os.Lstat(filepath.Join(root, "profiles", profile, name)); !os.IsNotExist(err) {
+			t.Errorf("idle profile retained rebuildable cache %s: %v", name, err)
+		}
+	}
 	for _, name := range []string{"SingletonLock", "SingletonSocket", "SingletonCookie"} {
 		if _, err = os.Lstat(filepath.Join(root, "profiles", profile, name)); !os.IsNotExist(err) {
 			t.Errorf("browser left %s for %s", name, profile)

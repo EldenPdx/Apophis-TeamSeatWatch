@@ -18,6 +18,8 @@ The tool prepares the database, encryption material, certificates and two entry 
 
 The build stages the fixed SHA256 official ShardX 152.0.7977.65 ZIP in `.browser-artifacts/`; the runtime image contains only the unmodified extracted engine. Before a direct `docker build`, run `python3 tools/prepare-browser.py` (use `--source /path/to/ShardX-Linux.zip` to reuse the exact archive). Account profiles are created lazily and retained in the control service’s `browser-profiles` volume at `/var/lib/teamseatwatch/browser-profiles`. Restart and container recreation reuse this volume. Idle profiles run no browser. Fresh global concurrency defaults to five; saved proxy runtime parameters remain authoritative.
 
+After browser exit, HTTP, code and GPU/Dawn caches are reclaimed under the account profile lock. Interrupted cleanup is recovered when the profile next opens. Fixed fingerprints, device identity, cookies, persistent website storage and browser preferences remain intact. Caches remain available during an attempt and rebuild on the next launch. Cache limits are not a hard cap on the entire profile; persistent website data still counts toward disk capacity. Cleanup failures log `profile_cache_cleanup_failed` without reclassifying a completed login as a credential failure.
+
 ## 2. Open your workspace
 
 Import the displayed `installation/tls/authority/ca.crt` into your browser or operating system's trusted root store. Import the `.crt` certificate only.
