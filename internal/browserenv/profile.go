@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -91,6 +92,10 @@ func Open(ctx context.Context, root string, e Environment) (*Profile, error) {
 	// The inherited marker scopes recovery to this exact profile, regardless of
 	// PID reuse or the old container hostname. Keep the lock until all exit.
 	p.CleanupProcesses()
+	if err = p.removeCaches(); err != nil {
+		p.Close()
+		return nil, errors.New("browser profile cache recovery failed")
+	}
 	for _, name := range []string{"SingletonLock", "SingletonSocket", "SingletonCookie"} {
 		if err = os.Remove(filepath.Join(directory, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			p.Close()
@@ -123,6 +128,29 @@ func privateDirectory(path string) error {
 }
 
 func (p *Profile) ProcessEnvironment() string { return p.marker }
+
+// removeCaches runs only behind the profile lock and process-exit barrier.
+// Website storage and browser identity stay intact; unknown paths are retained.
+func (p *Profile) removeCaches() error {
+	root, err := os.OpenRoot(p.Directory)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	if info, err := root.Lstat("Default"); err == nil && !info.IsDir() {
+		return errors.New("browser profile Default directory invalid")
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	var result error
+	for _, name := range []string{
+		"Default/Cache", "Default/Code Cache", "GPUPersistentCache",
+		"Default/GPUCache", "Default/DawnWebGPUCache", "Default/DawnGraphiteCache",
+	} {
+		result = errors.Join(result, root.RemoveAll(name))
+	}
+	return result
+}
 
 // CleanupProcesses is also the final barrier before unlocking and returning the
 // proxy lease. Marker-bearing children are killed individually and by process
@@ -158,6 +186,11 @@ func (p *Profile) Close() {
 		return
 	}
 	p.CleanupProcesses()
+	if err := p.removeCaches(); err != nil {
+		// Cleanup failure must remain visible without exposing profile paths or
+		// turning an otherwise completed login into a credential failure.
+		slog.Warn("browser_profile_cache_cleanup_failed", "code", "profile_cache_cleanup_failed")
+	}
 	for _, name := range []string{"SingletonLock", "SingletonSocket", "SingletonCookie"} {
 		_ = os.Remove(filepath.Join(p.Directory, name))
 	}
