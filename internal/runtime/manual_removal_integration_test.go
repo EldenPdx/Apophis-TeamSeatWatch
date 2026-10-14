@@ -241,6 +241,91 @@ func TestManualRemovalWaitsForBatchJoinToFinish(t *testing.T) {
 	}
 }
 
+func TestManualRemovalAllowsConfirmedJoinWithHistoricalInvitationMarker(t *testing.T) {
+	for _, scope := range []string{"batch", "account"} {
+		t.Run(scope, func(t *testing.T) {
+			f := newSelectedRemovalFixture(t)
+			var membership uuid.UUID
+			if err := f.pool.QueryRow(t.Context(), `SELECT id FROM tsw_batch_memberships WHERE batch_id=$1`, f.batch).Scan(&membership); err != nil {
+				t.Fatal(err)
+			}
+			for _, query := range []string{
+				`UPDATE tsw_batches SET planned_at=now()+interval '2 days' WHERE id=$1`,
+				`UPDATE tsw_operation_targets SET outcome_code='member_confirmed',platform_request_may_have_reached=true,platform_request_stage='send_invitation',platform_request_started_at=now()-interval '1 hour' WHERE operation_id IN (SELECT id FROM tsw_operations WHERE batch_id=$1 AND operation_type='join')`,
+				`UPDATE tsw_operations SET status='succeeded',completed_at=now() WHERE batch_id=$1 AND operation_type='join'`,
+			} {
+				if _, err := f.pool.Exec(t.Context(), query, f.batch); err != nil {
+					t.Fatal(err)
+				}
+			}
+			path := "/api/owner/v1/batches/" + f.batch.String()
+			w := manualRemovalRequest(t, f, http.MethodGet, path+"/remove-preview?manual=true", nil)
+			var preview ownerapi.RemovalPreview
+			if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &preview) != nil || !preview.CanProceed || preview.Batch.Rotation.State != "not_due" {
+				t.Fatalf("confirmed join history blocked early removal: %d %s", w.Code, w.Body.String())
+			}
+			body := map[string]any{"confirm": true, "manual": true, "idempotencyKey": "confirmed-join-" + scope}
+			if scope == "account" {
+				body["membershipIds"] = []uuid.UUID{membership}
+			}
+			w = manualRemovalRequest(t, f, http.MethodPost, path+"/remove", body)
+			var operation ownerapi.RemovalOperation
+			if w.Code != http.StatusAccepted || json.Unmarshal(w.Body.Bytes(), &operation) != nil || operation.TargetTotal != 1 || len(operation.Targets) != 1 || operation.Targets[0].MembershipId != membership {
+				t.Fatalf("confirmed account removal rejected: %d %s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestManualRemovalWaitsForOutstandingConfirmedJoinTasks(t *testing.T) {
+	for _, kind := range []string{"join", "join_reconcile"} {
+		for _, status := range []string{"queued", "running", "retry_wait"} {
+			t.Run(kind+"/"+status, func(t *testing.T) {
+				f := newSelectedRemovalFixture(t)
+				if _, err := f.pool.Exec(t.Context(), `INSERT INTO tsw_tasks(operation_target_id,target_account_id,workspace_id,task_type,dedupe_key,status,input_snapshot,correlation_id,max_attempts,attempt_count,lease_owner,lease_token,lease_expires_at)
+					SELECT target.id,membership.target_account_id,operation.workspace_id,$2,'outstanding-join',$3,'{}','outstanding-join',3,
+					CASE WHEN $3='queued' THEN 0 ELSE 1 END,CASE WHEN $3='running' THEN 'join-worker' END,
+					CASE WHEN $3='running' THEN gen_random_uuid() END,CASE WHEN $3='running' THEN now()+interval '1 minute' END
+					FROM tsw_operation_targets target JOIN tsw_operations operation ON operation.id=target.operation_id
+					JOIN tsw_batch_memberships membership ON membership.id=target.membership_id WHERE operation.batch_id=$1`, f.batch, kind, status); err != nil {
+					t.Fatal(err)
+				}
+				path := "/api/owner/v1/batches/" + f.batch.String()
+				w := manualRemovalRequest(t, f, http.MethodGet, path+"/remove-preview?manual=true", nil)
+				var preview ownerapi.RemovalPreview
+				if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &preview) != nil || preview.CanProceed {
+					t.Fatalf("outstanding join task admitted removal: %d %s", w.Code, w.Body.String())
+				}
+				w = manualRemovalRequest(t, f, http.MethodPost, path+"/remove", map[string]any{"confirm": true, "manual": true, "idempotencyKey": "outstanding-join-clear"})
+				if w.Code != http.StatusConflict {
+					t.Fatalf("outstanding join task authorized removal: %d %s", w.Code, w.Body.String())
+				}
+			})
+		}
+	}
+}
+
+func TestManualRemovalKeepsUnconfirmedJoinRequestsBlocked(t *testing.T) {
+	for _, status := range []string{"failed", "unknown"} {
+		t.Run(status, func(t *testing.T) {
+			f := newSelectedRemovalFixture(t)
+			if _, err := f.pool.Exec(t.Context(), `UPDATE tsw_operation_targets SET status=$2,outcome_code='platform_unknown',platform_request_may_have_reached=true,platform_request_stage='send_invitation',platform_request_started_at=now() WHERE operation_id IN (SELECT id FROM tsw_operations WHERE batch_id=$1 AND operation_type='join')`, f.batch, status); err != nil {
+				t.Fatal(err)
+			}
+			path := "/api/owner/v1/batches/" + f.batch.String()
+			w := manualRemovalRequest(t, f, http.MethodGet, path+"/remove-preview?manual=true", nil)
+			var preview ownerapi.RemovalPreview
+			if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &preview) != nil || preview.CanProceed {
+				t.Fatalf("unconfirmed join request admitted removal: %d %s", w.Code, w.Body.String())
+			}
+			w = manualRemovalRequest(t, f, http.MethodPost, path+"/remove", map[string]any{"confirm": true, "manual": true, "idempotencyKey": "unconfirmed-join-clear"})
+			if w.Code != http.StatusConflict {
+				t.Fatalf("unconfirmed join request authorized removal: %d %s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
 func TestManualRemovalAuthorizationLocksAccountsBeforeBatch(t *testing.T) {
 	f := newSelectedRemovalFixture(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)

@@ -135,7 +135,9 @@ type removalSnapshot struct {
 func removalPreviewWithSnapshot(ctx context.Context, query removalQuerier, batch ownerapi.Batch, snapshot removalSnapshot) (ownerapi.RemovalPreview, error) {
 	preview := ownerapi.RemovalPreview{Batch: batch, Targets: []ownerapi.RemovalPreviewTarget{}, Differences: []ownerapi.RemovalDifference{}, Blockers: []ownerapi.PreviewBlocker{}, SnapshotCompleteness: snapshot.completeness, SnapshotObservedAt: snapshot.snapshotObserved, SnapshotSource: snapshot.snapshotSource, DeclaredMemberCount: snapshot.declaredCount}
 	var joinUnsettled bool
-	if err := query.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM tsw_operations operation JOIN tsw_operation_targets target ON target.operation_id=operation.id WHERE operation.batch_id=$1 AND operation.operation_type='join' AND (target.status NOT IN ('succeeded','failed') OR target.platform_request_may_have_reached))`, batch.Id).Scan(&joinUnsettled); err != nil {
+	if err := query.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM tsw_operations operation JOIN tsw_operation_targets target ON target.operation_id=operation.id
+		WHERE operation.batch_id=$1 AND operation.operation_type='join' AND (target.status NOT IN ('succeeded','failed') OR (target.status='failed' AND target.platform_request_may_have_reached)
+		OR EXISTS(SELECT 1 FROM tsw_tasks task WHERE task.operation_target_id=target.id AND task.task_type IN ('join','join_reconcile') AND task.status IN ('queued','running','retry_wait'))))`, batch.Id).Scan(&joinUnsettled); err != nil {
 		return preview, err
 	}
 	if joinUnsettled {
