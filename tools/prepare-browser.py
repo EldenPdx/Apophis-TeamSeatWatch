@@ -36,7 +36,9 @@ def prepare(source=None):
             except OSError:
                 shutil.copyfile(source, staged)
         else:
-            with urllib.request.urlopen(URL, timeout=60) as response, staged.open('wb') as target:
+            # The artifact host rejects urllib's default Python user agent.
+            request = urllib.request.Request(URL, headers={'User-Agent': 'TeamSeatWatch-browser-preparer'})
+            with urllib.request.urlopen(request, timeout=60) as response, staged.open('wb') as target:
                 shutil.copyfileobj(response, target)
         if digest(staged) != SHA256:
             raise RuntimeError('Qualified browser archive checksum mismatch')

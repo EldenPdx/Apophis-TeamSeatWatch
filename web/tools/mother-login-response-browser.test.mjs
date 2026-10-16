@@ -59,7 +59,7 @@ test('both mother login entry points recover a lost response without repeating t
         if (entry === 'row') await f.row.getByText('登录中', { exact: true }).first().waitFor();
         else await f.page.getByText('母号登录已失效，正在自动重新登录', { exact: true }).waitFor();
         // Let the lost POST settle and assert that its replacement is a GET.
-        await assertEventually(() => f.requests.some((request, index) => request.method === 'GET' && request.path.endsWith('/personal-session') && index > f.requests.findIndex(item => item.method === 'POST' && item.path.endsWith('/personal-session'))));
+        await assertEventually(() => f.loginPosts().length === 1 && f.requests.some((request, index) => request.method === 'GET' && request.path.endsWith('/personal-session') && index > f.requests.findIndex(item => item.method === 'POST' && item.path.endsWith('/personal-session'))));
         assert.equal(f.loginPosts().length, 1);
         assert.equal(await f.page.getByText('母号登录失败，请重试。', { exact: true }).count(), 0);
         if (entry === 'row') assert.equal(await f.row.getByRole('button', { name: '登录中', exact: true }).isDisabled(), true);

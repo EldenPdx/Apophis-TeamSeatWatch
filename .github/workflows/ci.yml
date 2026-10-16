@@ -50,7 +50,7 @@ jobs:
           pnpm --dir web build
           pnpm --dir web test
           node --test $(find web/tools -maxdepth 1 -name '*.test.mjs' ! -name '*-browser.test.mjs')
-      - name: Manual rotation browser regression
+      - name: Owner browser regressions
         run: |
           npm install --prefix "$RUNNER_TEMP/rotation-browser" --no-package-lock --no-audit --no-fund playwright@1.62.1
           "$RUNNER_TEMP/rotation-browser/node_modules/.bin/playwright" install --with-deps chromium
@@ -66,7 +66,9 @@ jobs:
           export TSW_PLAYWRIGHT_MODULE="$RUNNER_TEMP/rotation-browser/node_modules/playwright/index.mjs"
           export TSW_CHROMIUM_PATH
           TSW_CHROMIUM_PATH=$(node -e 'const p=require(process.env.TSW_PLAYWRIGHT_MODULE.replace("index.mjs","index.js"));process.stdout.write(p.chromium.executablePath())')
-          node --test web/tools/rotation-removal-browser.test.mjs
+          export TSW_OWNER_BROWSER_URL=http://127.0.0.1:5194
+          export TSW_BROWSER_EXECUTABLE="$TSW_CHROMIUM_PATH"
+          node --test web/tools/rotation-removal-browser.test.mjs web/tools/mother-login-response-browser.test.mjs
 
   integration:
     runs-on: ubuntu-latest
@@ -109,3 +111,16 @@ jobs:
           node-version: 24.21.0
       - name: Container build and configuration smoke test
         run: node tools/verify-oci.mjs
+      - name: Persistent browser environment regressions
+        run: |
+          docker build --pull=false --platform linux/amd64 --target go-builder -t apophis-teamseatwatch:qualification-build .
+          task_qualification_dir=$(mktemp -d)
+          mkdir -p "$task_qualification_dir/evidence"
+          docker run --rm --network=none -e CGO_ENABLED=0 -e GOPROXY=off -e GOSUMDB=off -v "$task_qualification_dir:/out" apophis-teamseatwatch:qualification-build go test -tags qualification -c -o /out/platform.test ./internal/platform
+          for task_concurrency in 1 5; do
+            docker run --rm --network=none --memory=5g --memory-swap=5g --pids-limit=1024 --shm-size=256m \
+              -e TSW_BROWSER_EVIDENCE=/evidence -e TSW_ENVIRONMENT_CONCURRENCY="$task_concurrency" \
+              -v "$task_qualification_dir/platform.test:/apophis-teamseatwatch:ro" \
+              -v "$task_qualification_dir/evidence:/evidence" \
+              apophis-teamseatwatch:ticket-01-verify -test.run='^TestPersistentAccountEnvironmentBrowser$' -test.v -test.timeout=10m
+          done
