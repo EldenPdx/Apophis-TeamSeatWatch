@@ -8,7 +8,9 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestManagedPoolPreservesActiveIdentityAcrossRefreshAndDrift(t *testing.T) {
@@ -65,6 +67,7 @@ func TestManagedPoolConcurrentAcquisitionHonorsLimit(t *testing.T) {
 	manager.SetConcurrency(3)
 	start := make(chan struct{})
 	leases := make(chan *Lease, 20)
+	var active, peak atomic.Int32
 	var wait sync.WaitGroup
 	for range 20 {
 		wait.Add(1)
@@ -73,6 +76,12 @@ func TestManagedPoolConcurrentAcquisitionHonorsLimit(t *testing.T) {
 			<-start
 			lease, err := manager.Acquire(context.Background())
 			if err == nil {
+				n := active.Add(1)
+				for old := peak.Load(); n > old && !peak.CompareAndSwap(old, n); old = peak.Load() {
+				}
+				time.Sleep(5 * time.Millisecond)
+				active.Add(-1)
+				lease.Release()
 				leases <- lease
 			} else if !errors.Is(err, ErrLeaseExhausted) {
 				t.Errorf("capacity error=%v", err)
@@ -82,11 +91,12 @@ func TestManagedPoolConcurrentAcquisitionHonorsLimit(t *testing.T) {
 	close(start)
 	wait.Wait()
 	close(leases)
-	active := manager.ActiveCount()
+	completed := 0
 	for lease := range leases {
 		lease.Release()
+		completed++
 	}
-	if active != 3 || manager.ActiveCount() != 0 {
-		t.Fatalf("concurrent acquisitions active=%d remaining=%d", active, manager.ActiveCount())
+	if peak.Load() != 3 || completed != 20 || manager.ActiveCount() != 0 {
+		t.Fatalf("queued acquisitions peak=%d completed=%d remaining=%d", peak.Load(), completed, manager.ActiveCount())
 	}
 }

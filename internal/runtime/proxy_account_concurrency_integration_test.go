@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"github.com/google/uuid"
 	"github.com/xft0202/Apophis-TeamSeatWatch/internal/auth"
+	"github.com/xft0202/Apophis-TeamSeatWatch/internal/browserenv"
 	"github.com/xft0202/Apophis-TeamSeatWatch/internal/generated/ownerapi"
 	"github.com/xft0202/Apophis-TeamSeatWatch/internal/platform"
 	"net/http"
@@ -33,7 +34,7 @@ func (f *parallelPersonalFixture) RefreshPersonal(ctx context.Context, _ platfor
 	return platform.PersonalRefreshResult{Status: "ready", Session: platform.PersonalSession{AccessToken: "fixture-at", DeviceID: "fixture-device", Cookies: []platform.SessionCookie{{Name: "__Secure-next-auth.session-token", Value: "fixture-cookie"}}, ExpiresAt: time.Now().Add(time.Hour)}}, nil
 }
 
-func (f *parallelPersonalFixture) RenewPersonal(ctx context.Context, _ platform.PersonalSession) (platform.PersonalRefreshResult, error) {
+func (f *parallelPersonalFixture) RenewPersonal(ctx context.Context, _ platform.PersonalSession, _ browserenv.Environment) (platform.PersonalRefreshResult, error) {
 	return f.RefreshPersonal(ctx, platform.MotherMaterial{})
 }
 

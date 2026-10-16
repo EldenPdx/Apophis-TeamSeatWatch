@@ -117,7 +117,7 @@ func TestPersonalWebRefreshReportsBrowserChallengeWithoutCredentials(t *testing.
 	adapter := PersonalWebRefresher{Browser: fixturePersonalBrowser, Client: func(context.Context) (*http.Client, func(), error) {
 		return &http.Client{Transport: fixture, Timeout: time.Second}, func() {}, nil
 	}}
-	result, err := adapter.RefreshPersonal(t.Context(), MotherMaterial{LoginIdentifier: "account@example.test", Password: "password-secret", TOTPSecret: "JBSWY3DPEHPK3PXP"})
+	result, err := adapter.RefreshPersonal(t.Context(), MotherMaterial{Environment: fixtureEnvironment, LoginIdentifier: "account@example.test", Password: "password-secret", TOTPSecret: "JBSWY3DPEHPK3PXP"})
 	data, _ := json.Marshal(result)
 	var facts struct {
 		Failure *struct {
@@ -141,7 +141,7 @@ func TestPersonalWebRefreshUsesOnlyPasswordTOTPAndSessionGET(t *testing.T) {
 		leases++
 		return client, func() { releases++ }, nil
 	}}
-	result, err := adapter.RefreshPersonal(t.Context(), MotherMaterial{LoginIdentifier: "mother@example.test", Password: "password", TOTPSecret: "JBSWY3DPEHPK3PXP"})
+	result, err := adapter.RefreshPersonal(t.Context(), MotherMaterial{Environment: fixtureEnvironment, LoginIdentifier: "mother@example.test", Password: "password", TOTPSecret: "JBSWY3DPEHPK3PXP"})
 	if err != nil || result.Status != "ready" || result.Session.AccessToken != fixture.token || result.Session.DeviceID == "" || len(result.Session.Cookies) != 1 || leases != 1 || releases != 1 || fixture.blocked {
 		t.Fatalf("result=%+v err=%v requests=%v lease=%d/%d", result, err, fixture.paths, leases, releases)
 	}
@@ -179,7 +179,7 @@ func TestPersonalRefreshAndDiscoveryAcquireSeparateLeases(t *testing.T) {
 		acquired++
 		return client, func() { released++ }, nil
 	}
-	refreshed, err := (PersonalWebRefresher{Browser: fixturePersonalBrowser, Client: factory}).RefreshPersonal(t.Context(), MotherMaterial{LoginIdentifier: "mother@example.test", Password: "password", TOTPSecret: "JBSWY3DPEHPK3PXP"})
+	refreshed, err := (PersonalWebRefresher{Browser: fixturePersonalBrowser, Client: factory}).RefreshPersonal(t.Context(), MotherMaterial{Environment: fixtureEnvironment, LoginIdentifier: "mother@example.test", Password: "password", TOTPSecret: "JBSWY3DPEHPK3PXP"})
 	if err != nil || refreshed.Status != "ready" {
 		t.Fatalf("Personal refresh: %+v %v", refreshed, err)
 	}
@@ -247,7 +247,7 @@ func TestPersonalWebRefreshRejectsRedirectsClaimsAndBadTOTP(t *testing.T) {
 			tt.mutate(fixture)
 			client := &http.Client{Transport: fixture, Timeout: time.Second}
 			adapter := PersonalWebRefresher{Browser: fixturePersonalBrowser, Client: func(context.Context) (*http.Client, func(), error) { return client, func() {}, nil }}
-			result, err := adapter.RefreshPersonal(t.Context(), MotherMaterial{LoginIdentifier: "mother@example.test", Password: "password", TOTPSecret: "JBSWY3DPEHPK3PXP"})
+			result, err := adapter.RefreshPersonal(t.Context(), MotherMaterial{Environment: fixtureEnvironment, LoginIdentifier: "mother@example.test", Password: "password", TOTPSecret: "JBSWY3DPEHPK3PXP"})
 			if err != nil || result.Status == "ready" || result.Session.AccessToken != "" || fixture.blocked {
 				t.Fatalf("unexpected result=%+v err=%v paths=%v", result, err, fixture.paths)
 			}
@@ -255,7 +255,7 @@ func TestPersonalWebRefreshRejectsRedirectsClaimsAndBadTOTP(t *testing.T) {
 	}
 	called := false
 	adapter := PersonalWebRefresher{Browser: fixturePersonalBrowser, Client: func(context.Context) (*http.Client, func(), error) { called = true; return nil, nil, nil }}
-	result, _ := adapter.RefreshPersonal(t.Context(), MotherMaterial{LoginIdentifier: "mother@example.test", Password: "password", TOTPSecret: "bad"})
+	result, _ := adapter.RefreshPersonal(t.Context(), MotherMaterial{Environment: fixtureEnvironment, LoginIdentifier: "mother@example.test", Password: "password", TOTPSecret: "bad"})
 	if called || result.Status != "refresh_failed" {
 		t.Fatal("invalid TOTP reached transport")
 	}
@@ -276,7 +276,7 @@ func TestAcquirePersonalUsesCookiesBeforePasswordAndKeepsPlatformExpiry(t *testi
 		}
 		return fixture.RoundTrip(req)
 	})}
-	result, err := AcquirePersonal(t.Context(), PersonalWebRefresher{Browser: fixturePersonalBrowser, Client: func(context.Context) (*http.Client, func(), error) { return client, nil, nil }}, MotherMaterial{}, old)
+	result, err := AcquirePersonal(t.Context(), PersonalWebRefresher{Browser: fixturePersonalBrowser, Client: func(context.Context) (*http.Client, func(), error) { return client, nil, nil }}, MotherMaterial{Environment: fixtureEnvironment}, old)
 	if err != nil || result.Status != "ready" || !result.Session.ExpiresAt.Equal(tokenExpiry) || !result.Session.SessionExpiresAt.Equal(sessionExpiry) {
 		t.Fatalf("renewal status=%s err=%v expiry=%v/%v", result.Status, err, result.Session.ExpiresAt, result.Session.SessionExpiresAt)
 	}
@@ -287,7 +287,7 @@ func TestAcquirePersonalUsesCookiesBeforePasswordAndKeepsPlatformExpiry(t *testi
 		t.Fatal("renewal changed saved input")
 	}
 	fixture.paths = nil
-	if result, err = AcquirePersonal(t.Context(), PersonalWebRefresher{}, MotherMaterial{}, result.Session); err != nil || result.Status != "ready" || len(fixture.paths) != 0 {
+	if result, err = AcquirePersonal(t.Context(), PersonalWebRefresher{}, MotherMaterial{Environment: fixtureEnvironment}, result.Session); err != nil || result.Status != "ready" || len(fixture.paths) != 0 {
 		t.Fatal("valid session was not reused without a lease")
 	}
 }
@@ -312,7 +312,7 @@ func TestAcquirePersonalFallsBackOnlyForConfirmedLoggedOutSession(t *testing.T) 
 				return fixture.RoundTrip(req)
 			})}
 			saved := PersonalSession{DeviceID: "device", ExpiresAt: time.Now().Add(-time.Hour), Cookies: []SessionCookie{{Name: "__Secure-next-auth.session-token", Value: "saved"}}}
-			result, err := AcquirePersonal(t.Context(), PersonalWebRefresher{Browser: fixturePersonalBrowser, Client: func(context.Context) (*http.Client, func(), error) { return client, nil, nil }}, MotherMaterial{LoginIdentifier: "member@example.test", Password: "pw", TOTPSecret: "JBSWY3DPEHPK3PXP"}, saved)
+			result, err := AcquirePersonal(t.Context(), PersonalWebRefresher{Browser: fixturePersonalBrowser, Client: func(context.Context) (*http.Client, func(), error) { return client, nil, nil }}, MotherMaterial{Environment: fixtureEnvironment, LoginIdentifier: "member@example.test", Password: "pw", TOTPSecret: "JBSWY3DPEHPK3PXP"}, saved)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -334,7 +334,7 @@ func TestPersonalRefreshSubmitsPasswordResponseChallengeWithoutLoadingAnotherPag
 	adapter := PersonalWebRefresher{Browser: fixturePersonalBrowser, Client: func(context.Context) (*http.Client, func(), error) {
 		return &http.Client{Transport: fixture, Timeout: time.Second}, func() {}, nil
 	}}
-	result, err := adapter.RefreshPersonal(t.Context(), MotherMaterial{LoginIdentifier: "account@example.test", Password: "password", TOTPSecret: "JBSWY3DPEHPK3PXP"})
+	result, err := adapter.RefreshPersonal(t.Context(), MotherMaterial{Environment: fixtureEnvironment, LoginIdentifier: "account@example.test", Password: "password", TOTPSecret: "JBSWY3DPEHPK3PXP"})
 	if err != nil || result.Status != "ready" || fixture.blocked {
 		t.Fatalf("password challenge not submitted: status=%s err=%v", result.Status, err)
 	}
@@ -342,5 +342,15 @@ func TestPersonalRefreshSubmitsPasswordResponseChallengeWithoutLoadingAnotherPag
 		if strings.Contains(path, "mfa-challenge/") {
 			t.Fatal("loaded a challenge page despite the verified password response already identifying it")
 		}
+	}
+}
+
+func TestPersonalGuardRejectionDoesNotReportNetworkFailure(t *testing.T) {
+	fixture := &personalFlowFixture{signin: officialAuthBase + "/oauth/authorize", token: personalFixtureToken(time.Now(), nil)}
+	source := &http.Client{Transport: fixture, Timeout: time.Second}
+	adapter := PersonalWebRefresher{Browser: fixturePersonalBrowser, Client: func(context.Context) (*http.Client, func(), error) { return source, func() {}, nil }}
+	result, err := adapter.RefreshPersonal(t.Context(), MotherMaterial{Environment: fixtureEnvironment, LoginIdentifier: "member@example.test", Password: "pw", TOTPSecret: "JBSWY3DPEHPK3PXP"})
+	if err != nil || result.Status != "refresh_failed" || result.Failure == nil || result.Failure.Code != "login_request_failed" {
+		t.Fatalf("local scope rejection classified as network: result=%+v err=%v", result, err)
 	}
 }

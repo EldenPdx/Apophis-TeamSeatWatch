@@ -12,7 +12,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	openapi_types "github.com/oapi-codegen/runtime/types"
+	"github.com/xft0202/Apophis-TeamSeatWatch/internal/accountsession"
 	"github.com/xft0202/Apophis-TeamSeatWatch/internal/auth"
+	"github.com/xft0202/Apophis-TeamSeatWatch/internal/browserenv"
 	"github.com/xft0202/Apophis-TeamSeatWatch/internal/generated/ownerapi"
 	"github.com/xft0202/Apophis-TeamSeatWatch/internal/mothersecret"
 	"github.com/xft0202/Apophis-TeamSeatWatch/internal/platform"
@@ -54,6 +56,10 @@ func (h *OwnerAuthHandler) reservePersonalRefresh(ctx context.Context, id uuid.U
 	var active bool
 	err = tx.QueryRow(ctx, `SELECT credential.login_identifier,credential.password_secret,credential.totp_secret,credential.secret_revision,account.status='active' FROM tsw_mother_accounts account JOIN tsw_mother_account_credentials credential ON credential.mother_account_id=account.id WHERE account.id=$1 FOR UPDATE OF account,credential`, id).Scan(&attempt.material.LoginIdentifier, &password, &totp, &attempt.revision, &active)
 	if err != nil || !active {
+		return attempt, active, err
+	}
+	attempt.material.Environment, err = browserenv.Ensure(ctx, tx, "mother", id)
+	if err != nil {
 		return attempt, active, err
 	}
 	plainPassword, openErr := mothersecret.Open(h.keyRing, id, attempt.revision, mothersecret.Password, password)
@@ -111,8 +117,10 @@ func (h *OwnerAuthHandler) RefreshMotherPersonalAccess(w http.ResponseWriter, r 
 	// A reserved login belongs to the service, so refreshing the page cannot
 	// cancel its result publication. Allow for the shared lease wait and TOTP
 	// rollover as well as the measured full login; keep every stage bounded.
-	taskCtx, stopTask := context.WithTimeout(context.WithoutCancel(r.Context()), motherPersonalRefreshTimeout)
+	taskCtx, stopTask := h.personalRefreshContext(r.Context())
 	defer stopTask()
+	stopHeartbeat := accountsession.KeepVerifying(taskCtx, h.pool, "mother", id, attempt.revision, attempt.attempt)
+	defer stopHeartbeat()
 	r = r.WithContext(taskCtx)
 	persisted := false
 	defer func() {

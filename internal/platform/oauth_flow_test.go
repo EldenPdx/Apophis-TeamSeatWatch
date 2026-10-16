@@ -120,7 +120,7 @@ func TestCreateDeliveryCredentialsRunsWorkspacePKCEFlow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := reader.CreateDeliveryCredentials(context.Background(), DeliveryCredentialRequest{
+	result, err := reader.CreateDeliveryCredentials(context.Background(), DeliveryCredentialRequest{Environment: fixtureEnvironment,
 		Identifier: "member@example.com", Password: "pw", TOTPSecret: "JBSWY3DPEHPK3PXP", Workspace: "workspace-1",
 	})
 	if err != nil {
@@ -147,7 +147,7 @@ func TestCreateDeliveryCredentialsUsesFreshAttemptCookieJar(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	input := DeliveryCredentialRequest{Identifier: "member@example.com", Password: "pw", TOTPSecret: "JBSWY3DPEHPK3PXP", Workspace: "workspace-1"}
+	input := DeliveryCredentialRequest{Environment: fixtureEnvironment, Identifier: "member@example.com", Password: "pw", TOTPSecret: "JBSWY3DPEHPK3PXP", Workspace: "workspace-1"}
 	if _, err := reader.CreateDeliveryCredentials(context.Background(), input); err != nil {
 		t.Fatalf("first attempt: %v", err)
 	}
@@ -182,7 +182,7 @@ func TestCreateDeliveryCredentialsRequiresTOTP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = reader.CreateDeliveryCredentials(context.Background(), DeliveryCredentialRequest{Identifier: "member@example.com", Password: "pw", Workspace: "workspace-1"})
+	_, err = reader.CreateDeliveryCredentials(context.Background(), DeliveryCredentialRequest{Environment: fixtureEnvironment, Identifier: "member@example.com", Password: "pw", Workspace: "workspace-1"})
 	if err == nil || !strings.Contains(err.Error(), "requires TOTP") {
 		t.Fatalf("err=%v", err)
 	}
@@ -253,7 +253,7 @@ func TestDeliveryAuthorizationReusesSavedAccountSession(t *testing.T) {
 	}
 	reader.config.workspaceBrowser = fixtureWorkspaceOAuthBrowser
 	saved := PersonalSession{AccessToken: "saved-at", DeviceID: "saved-device", ExpiresAt: time.Now().Add(7 * 24 * time.Hour), Cookies: []SessionCookie{{Name: "__Secure-next-auth.session-token", Value: "saved-cookie"}, {Name: "auth-session", Value: "auth-cookie", Host: "auth.openai.com"}}}
-	generated, err := reader.CreateDeliveryCredentials(t.Context(), DeliveryCredentialRequest{Identifier: "member@example.com", Password: "pw", TOTPSecret: "JBSWY3DPEHPK3PXP", Workspace: "workspace-1", PersonalSession: &saved})
+	generated, err := reader.CreateDeliveryCredentials(t.Context(), DeliveryCredentialRequest{Environment: fixtureEnvironment, Identifier: "member@example.com", Password: "pw", TOTPSecret: "JBSWY3DPEHPK3PXP", Workspace: "workspace-1", PersonalSession: &saved})
 	if err != nil || generated.WorkspaceID != "workspace-1" || transport.loginRequests != 0 {
 		t.Fatalf("reused login=%d err=%v", transport.loginRequests, err)
 	}
@@ -286,7 +286,7 @@ func TestDeliveryAuthorizationReportsOnlyConfirmedSessionRejection(t *testing.T)
 			}
 			reader.config.workspaceBrowser = fixtureWorkspaceOAuthBrowser
 			saved := PersonalSession{AccessToken: "saved-at", DeviceID: "device", ExpiresAt: time.Now().Add(time.Hour), Cookies: []SessionCookie{{Name: "__Secure-next-auth.session-token", Value: "cookie"}}}
-			_, err = reader.CreateDeliveryCredentials(t.Context(), DeliveryCredentialRequest{Identifier: "member@example.com", Password: "pw", TOTPSecret: "JBSWY3DPEHPK3PXP", Workspace: "workspace-1", PersonalSession: &saved})
+			_, err = reader.CreateDeliveryCredentials(t.Context(), DeliveryCredentialRequest{Environment: fixtureEnvironment, Identifier: "member@example.com", Password: "pw", TOTPSecret: "JBSWY3DPEHPK3PXP", Workspace: "workspace-1", PersonalSession: &saved})
 			if errors.Is(err, ErrBrowserSessionExpired) != tc.expired || fixture.loginRequests != 0 {
 				t.Fatalf("session expired=%v want=%v login=%d err=%v", errors.Is(err, ErrBrowserSessionExpired), tc.expired, fixture.loginRequests, err)
 			}

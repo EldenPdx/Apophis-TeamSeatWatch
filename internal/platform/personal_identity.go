@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"github.com/xft0202/Apophis-TeamSeatWatch/internal/browserenv"
 	"io"
 	"net/http"
 	"net/mail"
@@ -54,6 +55,7 @@ func (c OfficialPersonalIdentityConfirmer) ConfirmPersonalIdentity(ctx context.C
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", browserAuthUA)
+	req.Header.Set("Accept-Language", browserenv.AcceptLanguage)
 	response, err := client.Do(req)
 	if err != nil || response == nil {
 		return fail()

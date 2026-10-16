@@ -22,6 +22,8 @@ services:
     volumes:
       - ${TSW_INSTALL_DIR}/keyring.json:/secrets/keyring.json:ro
       - ${TSW_INSTALL_DIR}/tls/control:/tls:ro
+      - browser-profiles:/var/lib/teamseatwatch/browser-profiles
+    shm_size: 256m
 
   gateway:
     image: ${TSW_IMAGE}
@@ -50,3 +52,4 @@ services:
 
 volumes:
   database:
+  browser-profiles:

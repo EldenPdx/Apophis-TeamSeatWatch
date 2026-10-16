@@ -4,6 +4,7 @@ package runtime
 
 import (
 	"context"
+	"github.com/xft0202/Apophis-TeamSeatWatch/internal/browserenv"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -75,7 +76,7 @@ type targetRenewFixture struct {
 	renewCalls int
 }
 
-func (f *targetRenewFixture) RenewPersonal(context.Context, platform.PersonalSession) (platform.PersonalRefreshResult, error) {
+func (f *targetRenewFixture) RenewPersonal(context.Context, platform.PersonalSession, browserenv.Environment) (platform.PersonalRefreshResult, error) {
 	f.renewCalls++
 	return f.renewal, nil
 }

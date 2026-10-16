@@ -43,7 +43,7 @@ func (w *Worker) runDeliveryGeneration(ctx context.Context, item Task, lease *eg
 	if err != nil || personal.Status != "ready" {
 		return w.finishDeliveryAttempt(ctx, item, attempt, target, platform.DeliveryCredentialSet{}, probeFailure("account_session_unavailable"))
 	}
-	input := platform.DeliveryCredentialRequest{Identifier: target.TargetIdentifier, Password: target.Password, TOTPSecret: target.TOTPSecret, Recovery: target.RecoverySecret, Workspace: target.PlatformWorkspace, PersonalSession: &personal.Session}
+	input := platform.DeliveryCredentialRequest{Environment: personal.Environment, Identifier: target.TargetIdentifier, Password: target.Password, TOTPSecret: target.TOTPSecret, Recovery: target.RecoverySecret, Workspace: target.PlatformWorkspace, PersonalSession: &personal.Session}
 	generated, err := generator.CreateDeliveryCredentials(ctx, input)
 	if errors.Is(err, platform.ErrBrowserSessionExpired) {
 		// Only confirmed authentication rejection authorizes one fresh login.

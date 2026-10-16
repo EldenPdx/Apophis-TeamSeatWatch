@@ -12,11 +12,12 @@ import (
 	"sync/atomic"
 
 	"github.com/chromedp/cdproto/network"
+	"github.com/xft0202/Apophis-TeamSeatWatch/internal/browserenv"
 )
 
 // WorkspaceOAuthBrowserFactory binds one authorization browser to the existing
 // network lease and the operation's exact workspace. Personal login stays separate.
-type WorkspaceOAuthBrowserFactory func(context.Context, *http.Client, http.CookieJar, string) (http.RoundTripper, func(), error)
+type WorkspaceOAuthBrowserFactory func(context.Context, *http.Client, http.CookieJar, string, browserenv.Environment) (http.RoundTripper, func(), error)
 
 type workspaceOAuthBrowser struct {
 	document  personalBrowserTransport
@@ -39,7 +40,7 @@ func readAndRestoreBody(req *http.Request) ([]byte, error) {
 	return data, nil
 }
 
-func NewWorkspaceOAuthBrowser(ctx context.Context, source *http.Client, jar http.CookieJar, workspace string) (http.RoundTripper, func(), error) {
+func NewWorkspaceOAuthBrowser(ctx context.Context, source *http.Client, jar http.CookieJar, workspace string, environment browserenv.Environment) (http.RoundTripper, func(), error) {
 	if jar == nil || strings.TrimSpace(workspace) == "" {
 		return nil, nil, errors.New("OAuth browser input invalid")
 	}
@@ -52,7 +53,7 @@ func NewWorkspaceOAuthBrowser(ctx context.Context, source *http.Client, jar http
 		}
 		return ""
 	}
-	browser, closeBrowser, _, err := personalBrowser(ctx, source, t.allowed)
+	browser, closeBrowser, _, err := personalBrowser(ctx, source, t.allowed, environment)
 	if err != nil {
 		return nil, nil, err
 	}

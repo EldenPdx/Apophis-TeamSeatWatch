@@ -1,6 +1,8 @@
 import { spawnSync } from 'node:child_process';
 
 const image = 'apophis-teamseatwatch:ticket-01-verify';
+const artifact = spawnSync('python3', ['tools/prepare-browser.py'], { stdio: 'inherit' });
+if (artifact.error || artifact.status !== 0) process.exit(artifact.status ?? 1);
 const build = spawnSync('docker', ['build', '--pull=false', '--platform', 'linux/amd64', '-t', image, '.'], { stdio: 'inherit' });
 if (build.error || build.status !== 0) {
   process.exit(build.status ?? 1);

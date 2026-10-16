@@ -3,6 +3,8 @@ package task
 import (
 	"context"
 	"errors"
+	"github.com/google/uuid"
+	"github.com/xft0202/Apophis-TeamSeatWatch/internal/accountsession"
 	"strings"
 	"time"
 
@@ -107,12 +109,17 @@ func (w *Worker) runDeliveryReclaim(ctx context.Context, item Task, lease *egres
 	// A fresh browser context is required for the password/TOTP leg while the
 	// HTTP transport remains lease-bound to the same egress route.
 	lease.Client().Jar = nil
+	environment, err := (accountsession.Store{Pool: w.Store.pool, KeyRing: w.Store.keyRing}).Environment(ctx, uuid.MustParse(target.TargetAccountID))
+	if err != nil {
+		return err
+	}
 	generated, reloginErr := adapter.CreateDeliveryCredentials(ctx, platform.DeliveryCredentialRequest{
-		Identifier: target.TargetIdentifier,
-		Password:   target.Password,
-		TOTPSecret: target.TOTPSecret,
-		Recovery:   target.RecoverySecret,
-		Workspace:  target.PlatformWorkspace,
+		Environment: environment,
+		Identifier:  target.TargetIdentifier,
+		Password:    target.Password,
+		TOTPSecret:  target.TOTPSecret,
+		Recovery:    target.RecoverySecret,
+		Workspace:   target.PlatformWorkspace,
 	})
 	if reloginErr != nil {
 		return finish(platform.DeliveryCredentialSet{}, platform.DeliveryLiveness{Status: oauthdomain.ProbeUnknown, ErrorCode: "full_relogin_failed", Origin: "reclaim", ObservedAt: time.Now().UTC()}, "unrecoverable", false, true)

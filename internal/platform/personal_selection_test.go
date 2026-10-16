@@ -37,7 +37,7 @@ func TestPersonalLoginCompletesMultiAccountSelectionWithoutChoosingTeam(t *testi
 			return fixture.RoundTrip(req)
 		}
 	})}
-	result, err := (PersonalWebRefresher{Client: func(context.Context) (*http.Client, func(), error) { return client, func() {}, nil }, Browser: fixturePersonalBrowser}).RefreshPersonal(t.Context(), MotherMaterial{LoginIdentifier: "mother@example.test", Password: "password", TOTPSecret: "JBSWY3DPEHPK3PXP"})
+	result, err := (PersonalWebRefresher{Client: func(context.Context) (*http.Client, func(), error) { return client, func() {}, nil }, Browser: fixturePersonalBrowser}).RefreshPersonal(t.Context(), MotherMaterial{Environment: fixtureEnvironment, LoginIdentifier: "mother@example.test", Password: "password", TOTPSecret: "JBSWY3DPEHPK3PXP"})
 	if err != nil || result.Status != "ready" || selections != 1 {
 		t.Fatalf("multi-account login status=%s selections=%d error=%v", result.Status, selections, err)
 	}

@@ -5,10 +5,12 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/chromedp/cdproto/network"
+	"github.com/xft0202/Apophis-TeamSeatWatch/internal/browserenv"
 	"github.com/xft0202/Apophis-TeamSeatWatch/internal/egress"
 )
 
@@ -31,7 +33,18 @@ func ProbeBrowserReachability(ctx context.Context, source *http.Client, target s
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, 35*time.Second)
 	defer cancel()
-	browser, closeBrowser, route, err := personalBrowser(probeCtx, source, allowedReachabilityBrowserRequest)
+	// Diagnostics have no account or credentials. Their explicit disposable
+	// profile uses the same qualified engine and never enters a business factory.
+	environment, err := browserenv.New()
+	if err != nil {
+		return egress.ReachabilityResult{}, err
+	}
+	directory, err := os.MkdirTemp("", "tsw-proxy-browser-")
+	if err != nil {
+		return egress.ReachabilityResult{}, err
+	}
+	defer os.RemoveAll(directory)
+	browser, closeBrowser, route, err := launchBrowser(probeCtx, source, allowedReachabilityBrowserRequest, environment, directory, nil)
 	if err != nil {
 		if ctx.Err() != nil {
 			return egress.ReachabilityResult{}, ctx.Err()

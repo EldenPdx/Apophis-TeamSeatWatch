@@ -5,6 +5,7 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"github.com/xft0202/Apophis-TeamSeatWatch/internal/browserenv"
 	"io"
 	"net/http"
 	"strings"
@@ -25,7 +26,7 @@ func (transport *targetChallengeTransport) RoundTrip(request *http.Request) (*ht
 func TestTargetPersonalRefreshReturnsClassifiedChallenge(t *testing.T) {
 	pool, handler, id, call := targetReuseFixture(t)
 	transport := &targetChallengeTransport{}
-	handler.personalRefresh = platform.PersonalWebRefresher{Browser: func(_ context.Context, c *http.Client, _ http.CookieJar) (http.RoundTripper, func(), error) {
+	handler.personalRefresh = platform.PersonalWebRefresher{Browser: func(_ context.Context, c *http.Client, _ http.CookieJar, _ browserenv.Environment) (http.RoundTripper, func(), error) {
 		return c.Transport, func() {}, nil
 	}, Client: func(context.Context) (*http.Client, func(), error) {
 		return &http.Client{Transport: transport, Timeout: time.Second}, func() {}, nil

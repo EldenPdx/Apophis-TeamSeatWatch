@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/xft0202/Apophis-TeamSeatWatch/internal/browserenv"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -176,6 +177,7 @@ func (j OfficialRotationCandidateJoiner) do(ctx context.Context, client *http.Cl
 	req.Header.Set("Sec-Fetch-Mode", "cors")
 	req.Header.Set("Sec-Fetch-Dest", "empty")
 	req.Header.Set("User-Agent", browserAuthUA)
+	req.Header.Set("Accept-Language", browserenv.AcceptLanguage)
 	// Once Do is entered the attempt is never provably unsent, even if it
 	// fails locally. No receipt or error can discharge the sent obligation.
 	result.RequestSent = true
